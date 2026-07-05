@@ -10,6 +10,7 @@ import {
   type Member,
 } from "@signalai/client-sdk";
 import { DEFAULT_SYSTEM_PROMPT, type LlmClient } from "./llm.js";
+import type { KnowledgeSnippet, KnowledgeSource } from "./knowledge.js";
 
 /** The exact intro sent once per conversation the agent finds itself a member of (5B.3). */
 export const INTRO_TEXT =
@@ -20,6 +21,23 @@ export const DEGRADE_TEXT = "I'm having trouble responding right now — I'll be
 
 /** At most one degradation apology per conversation per this window. */
 const DEGRADE_COOLDOWN_MS = 30_000;
+
+/**
+ * Builds the system-prompt suffix that folds retrieved local-knowledge
+ * snippets in. Reconciles with {@link DEFAULT_SYSTEM_PROMPT}'s "do not claim
+ * to see anything outside this conversation" clause by framing the notes as
+ * an on-device background reference, never as chat content. Exported so
+ * tests can assert on the exact wording.
+ */
+export function KNOWLEDGE_BLOCK(snippets: KnowledgeSnippet[]): string {
+  const body = snippets.map((s) => `[${s.source}]\n${s.text}\n\n`).join("");
+  return (
+    "\n\nYou also have access to the operator's private local knowledge notes, retrieved on-device " +
+    "(they never leave this machine). Use them as background reference only when relevant, and mention " +
+    "the note name if you rely on one. They are not messages in this chat.\n\n" +
+    `<knowledge>\n${body}</knowledge>`
+  );
+}
 
 /** Resolved agent configuration (env-derived, but injectable for tests). */
 export interface AgentConfig {
@@ -39,6 +57,8 @@ export interface AgentConfig {
   systemPrompt: string;
   /** When true, plaintext bodies may be logged at debug level (never at info). */
   debugPlaintext: boolean;
+  /** Max local-knowledge snippets folded into the system prompt per reply (default 4; see `AGENT_VAULT_TOP_K`). */
+  knowledgeTopK: number;
 }
 
 function intFromEnv(raw: string | undefined, fallback: number): number {
@@ -62,6 +82,7 @@ export function loadAgentConfig(env: Record<string, string | undefined> = proces
     dbKey: env.AGENT_DB_KEY,
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     debugPlaintext: env.DEBUG_PLAINTEXT === "1" || env.DEBUG_PLAINTEXT === "true",
+    knowledgeTopK: intFromEnv(env.AGENT_VAULT_TOP_K, 4),
   };
 }
 
@@ -86,20 +107,31 @@ export class SignalAgent {
   private readonly config: AgentConfig;
   private readonly store: SqliteAgentStore;
   private readonly llm: LlmClient;
+  private readonly knowledge: KnowledgeSource | undefined;
   private client!: SignalAiClient;
   private queue: Promise<void> = Promise.resolve();
   private reconcileTimer: ReturnType<typeof setInterval> | undefined;
   private readonly lastDegradeAt = new Map<string, number>();
 
-  private constructor(config: AgentConfig, store: SqliteAgentStore, llm: LlmClient) {
+  private constructor(config: AgentConfig, store: SqliteAgentStore, llm: LlmClient, knowledge: KnowledgeSource | undefined) {
     this.config = config;
     this.store = store;
     this.llm = llm;
+    this.knowledge = knowledge;
   }
 
-  /** Constructs an agent from injected dependencies; call {@link boot} to connect. */
-  static async create(deps: { config: AgentConfig; store: SqliteAgentStore; llm: LlmClient }): Promise<SignalAgent> {
-    return new SignalAgent(deps.config, deps.store, deps.llm);
+  /**
+   * Constructs an agent from injected dependencies; call {@link boot} to connect.
+   * `knowledge` is optional and additive — omitting it (the default) preserves
+   * pre-existing behavior byte-for-byte.
+   */
+  static async create(deps: {
+    config: AgentConfig;
+    store: SqliteAgentStore;
+    llm: LlmClient;
+    knowledge?: KnowledgeSource;
+  }): Promise<SignalAgent> {
+    return new SignalAgent(deps.config, deps.store, deps.llm, deps.knowledge);
   }
 
   /** The agent's relay userId (valid after {@link boot}). */
@@ -292,9 +324,27 @@ export class SignalAgent {
   private async reply(conversationId: string): Promise<void> {
     const window = this.store.loadContext(conversationId); // isolation: strictly this conversation's history
     const messages = window.map((c) => ({ role: c.role, content: c.content }));
+
+    // Optional local-knowledge augmentation (default OFF, additive): only the
+    // `system` string is ever touched here — `messages` (the conversation
+    // window) remains untouched, preserving the isolation invariant above.
+    let system = this.config.systemPrompt;
+    if (this.knowledge) {
+      const lastUser = [...window].reverse().find((m) => m.role === "user");
+      if (lastUser) {
+        try {
+          const snippets = await this.knowledge.retrieve(lastUser.content, this.config.knowledgeTopK);
+          if (snippets.length > 0) system += KNOWLEDGE_BLOCK(snippets);
+        } catch (err) {
+          // Never fail the reply because knowledge retrieval broke — degrade to the base prompt.
+          this.logError(`knowledge.retrieve failed for ${conversationId}`, err);
+        }
+      }
+    }
+
     let text: string;
     try {
-      text = await this.llm.complete({ system: this.config.systemPrompt, messages });
+      text = await this.llm.complete({ system, messages });
     } catch (err) {
       await this.degrade(conversationId, err);
       return;

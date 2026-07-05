@@ -3,7 +3,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { WebSocket } from "ws";
 import { SignalAiClient } from "@signalai/client-sdk";
 import { INTRO_TEXT, DEGRADE_TEXT, type SignalAgent } from "../src/index.js";
-import { MockLlmClient, selectLlmClient } from "../src/llm.js";
+import { MockLlmClient, selectLlmClient, DEFAULT_SYSTEM_PROMPT } from "../src/llm.js";
+import type { KnowledgeSnippet, KnowledgeSource } from "../src/knowledge.js";
 import {
   type RelayHarness,
   startRelay,
@@ -391,6 +392,67 @@ describe("@signalai/agent — 5B.7", () => {
     },
     30_000,
   );
+});
+
+/** A {@link KnowledgeSource} test double whose `retrieve` behavior is fully controlled by the test. */
+class StubKnowledgeSource implements KnowledgeSource {
+  readonly kind = "stub";
+  constructor(private readonly impl: (query: string, k: number) => Promise<KnowledgeSnippet[]>) {}
+  retrieve(query: string, k: number): Promise<KnowledgeSnippet[]> {
+    return this.impl(query, k);
+  }
+}
+
+describe("@signalai/agent — vault knowledge (additive, default OFF)", () => {
+  it("folds a retrieved snippet into the system prompt, leaving the message transcript untouched", async () => {
+    const snippet: KnowledgeSnippet = {
+      source: "Projects/signal-ai.md › Phase 5",
+      text: "The agent gained a durable sqlite store.",
+      score: 3,
+    };
+    const knowledge = new StubKnowledgeSource(() => Promise.resolve([snippet]));
+    const { agent, llm } = await bootAgent(relayUrl(), { knowledge });
+    agents.push(agent);
+    const agentUserId = agent.userId;
+    const { human, convId, humanMsgs } = await humanWithAgent(agent.signalClient.username, agentUserId);
+
+    await human.send(convId, "@ai tell me about phase 5");
+    await waitUntil(() => humanMsgs.some((m) => m.senderUserId === agentUserId && m.text.startsWith("mock-reply:")));
+
+    expect(llm.calls).toHaveLength(1);
+    const { system, messages } = llm.calls[0]!;
+    expect(system).toContain(snippet.text);
+    expect(system).toContain("operator's private local knowledge notes");
+    expect(system).toContain("They are not messages in this chat");
+    // Isolation invariant: knowledge lives strictly in `system`, never in the conversation window.
+    expect(JSON.stringify(messages)).not.toContain(snippet.text);
+  }, 20_000);
+
+  it("with no knowledge source configured, the system prompt is unchanged", async () => {
+    const { agent, llm } = await bootAgent(relayUrl());
+    agents.push(agent);
+    const agentUserId = agent.userId;
+    const { human, convId, humanMsgs } = await humanWithAgent(agent.signalClient.username, agentUserId);
+
+    await human.send(convId, "@ai hello");
+    await waitUntil(() => humanMsgs.some((m) => m.senderUserId === agentUserId && m.text.startsWith("mock-reply:")));
+
+    expect(llm.calls[0]!.system).toBe(DEFAULT_SYSTEM_PROMPT);
+  }, 20_000);
+
+  it("degrades gracefully when retrieve() throws: reply still sends, system falls back to the base prompt", async () => {
+    const knowledge = new StubKnowledgeSource(() => Promise.reject(new Error("vault index build failed")));
+    const { agent, llm } = await bootAgent(relayUrl(), { knowledge });
+    agents.push(agent);
+    const agentUserId = agent.userId;
+    const { human, convId, humanMsgs } = await humanWithAgent(agent.signalClient.username, agentUserId);
+
+    await human.send(convId, "@ai are you there");
+    await waitUntil(() => humanMsgs.some((m) => m.senderUserId === agentUserId && m.text.startsWith("mock-reply:")));
+
+    expect(llm.calls).toHaveLength(1);
+    expect(llm.calls[0]!.system).toBe(DEFAULT_SYSTEM_PROMPT);
+  }, 20_000);
 });
 
 /** Opens a raw, one-shot authenticated WS connection and submits a single `send` frame, bypassing SignalAiClient entirely. */
