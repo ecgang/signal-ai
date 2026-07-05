@@ -14,7 +14,7 @@ import {
 import { parsePlaintextMessage, type PlaintextMessage, type Envelope, type PreKeyBundlePublic } from "@signalai/proto";
 import { createHttpWsTransport, type Transport } from "./transport.js";
 import { WsLink } from "./connection.js";
-import { InMemoryClientStores, type ClientStores } from "./stores.js";
+import { InMemoryClientStores, type ClientStores, type SerializedClientStores } from "./stores.js";
 import type { ConnectionState, Member, SignalAiClientHandlers } from "./types.js";
 
 const DEFAULT_INITIAL_OTP_COUNT = 5;
@@ -50,6 +50,8 @@ interface SignalAiClientInit {
   stores: ClientStores;
   provisioned: ProvisionedPreKeys;
   nextOneTimePreKeyId: number;
+  /** When true, {@link ensureSession} may fetch a peer's prekey bundle by opaque `userId` (not just by resolved `username`) — see the class doc. Default false. */
+  autoResolveMembersById?: boolean;
 }
 
 /**
@@ -85,6 +87,7 @@ export class SignalAiClient {
   private readonly kyberPreKeyRecord: ReturnType<typeof PrekeyManager.generateKyberPreKey>;
   private tokenValue: string;
   private nextOneTimePreKeyId: number;
+  private readonly autoResolveMembersById: boolean;
   private link: WsLink | undefined;
   private connectionStateValue: ConnectionState = "disconnected";
   private inbox: Promise<void> = Promise.resolve();
@@ -100,6 +103,7 @@ export class SignalAiClient {
     this.signedPreKeyRecord = init.provisioned.signedPreKey;
     this.kyberPreKeyRecord = init.provisioned.kyberPreKey;
     this.nextOneTimePreKeyId = init.nextOneTimePreKeyId;
+    this.autoResolveMembersById = init.autoResolveMembersById ?? false;
     this.sessionManager = new SessionManager(this.address, init.stores);
     this.fanout = new GroupFanout(this.sessionManager);
     this.username = init.username;
@@ -117,6 +121,14 @@ export class SignalAiClient {
   /** The raw relay bearer token, for advanced/test use (e.g. driving a second raw connection as this same identity). */
   get token(): string {
     return this.tokenValue;
+  }
+  /** This device's serialized identity key pair + registration id — persist alongside {@link stores}.toJSON() so the account can later {@link SignalAiClient.resume}. */
+  get serializedIdentity(): { identityKeyPair: Uint8Array; registrationId: number } {
+    return this.identity.serialize();
+  }
+  /** The next one-time-prekey id this device would allocate — persist for {@link SignalAiClient.resume} so ids don't collide after a restart. */
+  get nextPreKeyId(): number {
+    return this.nextOneTimePreKeyId;
   }
 
   /** Generates+publishes a batch of one-time prekeys, reusing the device's existing signed/kyber prekeys. Relay only accepts one OTP per `POST /devices` call, so this is `count` sequential requests. */
@@ -175,6 +187,7 @@ export class SignalAiClient {
     stores?: ClientStores;
     transport?: Transport;
     initialOneTimePreKeyCount?: number;
+    autoResolveMembersById?: boolean;
   }): Promise<SignalAiClient> {
     const transport = params.transport ?? createHttpWsTransport(params.relayUrl);
     const identity = Identity.generate();
@@ -203,6 +216,74 @@ export class SignalAiClient {
       stores,
       provisioned,
       nextOneTimePreKeyId: otpCount + 1,
+      autoResolveMembersById: params.autoResolveMembersById ?? false,
+    });
+    await client.connect();
+    return client;
+  }
+
+  /**
+   * Reconnects an EXISTING relay account from persisted state (identity +
+   * ratchet + client bookkeeping), WITHOUT re-provisioning or rotating any
+   * keys. This is a true restart/reinstall-of-the-same-device: the ratchet
+   * resumes exactly where it left off, so any envelope the relay redelivers on
+   * reconnect decrypts cleanly. Contrast {@link signup} / {@link reregisterDevice},
+   * which both generate a fresh identity and PUBLISH new bundles — `resume`
+   * publishes NOTHING (republishing would rotate this device's signed/kyber
+   * prekeys server-side and break peers mid-session).
+   *
+   * `serializedStores` + `serializedIdentity` + `nextOneTimePreKeyId` are what
+   * a durable store (e.g. SQLite) round-trips; get them from
+   * {@link stores}.toJSON(), {@link serializedIdentity}, and
+   * {@link nextPreKeyId} before shutdown.
+   */
+  static async resume(params: {
+    relayUrl: string;
+    token: string;
+    userId: string;
+    username: string;
+    deviceId?: number;
+    serializedIdentity: { identityKeyPair: Uint8Array; registrationId: number };
+    serializedStores: SerializedClientStores;
+    nextOneTimePreKeyId: number;
+    transport?: Transport;
+    autoResolveMembersById?: boolean;
+  }): Promise<SignalAiClient> {
+    const transport = params.transport ?? createHttpWsTransport(params.relayUrl);
+    const deviceId = params.deviceId ?? 1;
+    const identity = Identity.fromSerialized(
+      params.serializedIdentity.identityKeyPair,
+      params.serializedIdentity.registrationId,
+    );
+    const stores = InMemoryClientStores.fromJSON(params.serializedStores);
+
+    // Reconstruct the ProvisionedPreKeys the constructor needs (only the
+    // signed+kyber records are read post-construction — see the constructor
+    // and provisionAndPublishOtps). Read them back out of the rehydrated
+    // stores under whatever ids they were saved at (single source of truth;
+    // no re-generation, no re-publish). oneTimePreKeys aren't retained.
+    const signedPreKeyId = params.serializedStores.signedPreKeys[0]?.id;
+    const kyberPreKeyId = params.serializedStores.kyberPreKeys[0]?.id;
+    if (signedPreKeyId === undefined || kyberPreKeyId === undefined) {
+      throw new Error("resume: serialized stores are missing the signed/kyber prekey record needed to reconnect");
+    }
+    const provisioned: ProvisionedPreKeys = {
+      signedPreKey: await stores.signedPreKey.getSignedPreKey(signedPreKeyId),
+      kyberPreKey: await stores.kyberPreKey.getKyberPreKey(kyberPreKeyId),
+      oneTimePreKeys: [],
+    };
+
+    const client = new SignalAiClient({
+      transport,
+      token: params.token,
+      userId: params.userId,
+      username: params.username,
+      deviceId,
+      identity,
+      stores,
+      provisioned,
+      nextOneTimePreKeyId: params.nextOneTimePreKeyId,
+      autoResolveMembersById: params.autoResolveMembersById ?? false,
     });
     await client.connect();
     return client;
@@ -332,6 +413,23 @@ export class SignalAiClient {
     if (hasSession) return;
     const contact = this.stores.directory.get(remote.userId);
     if (!contact) {
+      // No resolved username. The human CLI (default) refuses here — it wants
+      // an explicit resolveUser(username) first so the trust surface (safety
+      // numbers) is anchored to a username. A headless member (the AI agent)
+      // opts into `autoResolveMembersById` to instead fetch the bundle by the
+      // opaque userId it learned from listMembers, so it can reply to a
+      // co-member it was never introduced to by name.
+      if (this.autoResolveMembersById) {
+        const bundlesById = await this.transport.fetchBundlesByUserId(this.tokenValue, remote.userId, remote.deviceId);
+        const wireBundleById = bundlesById.find((b) => b.deviceId === remote.deviceId);
+        if (!wireBundleById) {
+          throw new Error(
+            `ensureSession: relay returned no prekey bundle for userId "${remote.userId}"/device ${remote.deviceId}`,
+          );
+        }
+        await this.establishOrRefreshSession(remote, wireBundleById);
+        return;
+      }
       throw new Error(
         `ensureSession: no session and no resolved username for userId "${remote.userId}" — call resolveUser() for this contact before sending`,
       );

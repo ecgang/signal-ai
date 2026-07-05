@@ -239,6 +239,26 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
     return reply.code(200).send(body);
   });
 
+  // Fetch prekey bundles directly by opaque userId (not username). Same authz
+  // as the username route (any authenticated principal may fetch anyone's
+  // public prekeys — standard Signal behavior). Enables a member that only
+  // knows a co-member's userId (e.g. the AI agent, which learns members from
+  // listMembers with no username) to establish a session. An unknown userId
+  // simply has no active devices → `{ bundles: [] }` (200, not 404): the caller
+  // distinguishes an empty result itself.
+  app.get("/users/by-id/:userId/bundle", async (request, reply) => {
+    const { userId } = request.params as { userId: string };
+    const deviceIdRaw = (request.query as Record<string, string | undefined>).deviceId;
+    const deviceId = deviceIdRaw !== undefined ? Number(deviceIdRaw) : undefined;
+    if (deviceIdRaw !== undefined && (!Number.isInteger(deviceId) || deviceId! < 0)) {
+      return reply.code(400).send({ error: "invalid_device_id" });
+    }
+
+    const bundles = await fetchPreKeyBundles(prisma, { userId, deviceId });
+    const body: z.infer<typeof FetchPreKeyBundleResponseSchema> = { bundles };
+    return reply.code(200).send(body);
+  });
+
   app.post("/conversations", async (request, reply) => {
     const parsed = CreateConversationRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid_body" });

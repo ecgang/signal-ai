@@ -39,6 +39,8 @@ export interface Transport {
   signup(req: { inviteCode: string; username: string }): Promise<{ userId: string; token: string }>;
   publishDevice(token: string, userId: string, bundle: PreKeyBundlePublic): Promise<void>;
   fetchBundles(token: string, username: string, deviceId?: number): Promise<PreKeyBundlePublic[]>;
+  /** Like {@link fetchBundles} but keyed by the opaque `userId` instead of `username` (`GET /users/by-id/:userId/bundle`) — for callers that only know a peer's userId. */
+  fetchBundlesByUserId(token: string, userId: string, deviceId?: number): Promise<PreKeyBundlePublic[]>;
   createConversation(
     token: string,
     req: { creatorUserId: string; memberUserIds: string[]; aiMode: boolean },
@@ -101,6 +103,13 @@ export function createHttpWsTransport(relayUrl: string): Transport {
 
     async fetchBundles(token, username, deviceId) {
       const path = deviceId !== undefined ? `/users/${username}/bundle?deviceId=${deviceId}` : `/users/${username}/bundle`;
+      const json = (await requestJson(httpBase, "GET", path, { token })) as { bundles: PreKeyBundlePublic[] };
+      return json.bundles;
+    },
+
+    async fetchBundlesByUserId(token, userId, deviceId) {
+      const path =
+        deviceId !== undefined ? `/users/by-id/${userId}/bundle?deviceId=${deviceId}` : `/users/by-id/${userId}/bundle`;
       const json = (await requestJson(httpBase, "GET", path, { token })) as { bundles: PreKeyBundlePublic[] };
       return json.bundles;
     },

@@ -244,6 +244,41 @@ describe("prekey bundle consumption", () => {
   });
 });
 
+describe("prekey bundle fetch by userId", () => {
+  it("returns a bundle for a known userId (enables session with a member known only by userId)", async () => {
+    const alice = await signup("alice");
+    const bob = await signup("bob");
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/users/by-id/${alice.userId}/bundle`,
+      headers: auth(bob.token),
+    });
+    expect(res.statusCode).toBe(200);
+    const bundle = (res.json() as { bundles: PreKeyBundlePublic[] }).bundles[0]!;
+    expect(bundle).toBeDefined();
+    expect(bundle.userId).toBe(alice.userId);
+  });
+
+  it("returns an empty bundle list (not 404) for an unknown userId", async () => {
+    const bob = await signup("bob");
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/users/by-id/does-not-exist/bundle`,
+      headers: auth(bob.token),
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { bundles: PreKeyBundlePublic[] }).bundles).toEqual([]);
+  });
+
+  it("requires authentication", async () => {
+    const alice = await signup("alice");
+    const res = await app.inject({ method: "GET", url: `/users/by-id/${alice.userId}/bundle` });
+    expect(res.statusCode).toBe(401);
+  });
+});
+
 describe("conversation + membership authorization", () => {
   it("creates a conversation, lists members, and patches ai-mode", async () => {
     const alice = await signup("alice");

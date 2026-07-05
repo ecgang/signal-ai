@@ -1,6 +1,9 @@
 import {
   type CoreStores,
   type Identity,
+  type SerializedIdentityStore,
+  type SerializedSessionStore,
+  type SerializedIdKeyedStore,
   InMemoryIdentityKeyStore,
   InMemorySessionStore,
   InMemoryPreKeyStore,
@@ -31,6 +34,33 @@ export interface CachedConversation {
 export interface DirectoryEntry {
   username: string;
   deviceIds: number[];
+}
+
+/** JSON-safe serialized form of one {@link CachedConversation} (its member `Map` flattened to entries). */
+export interface SerializedCachedConversation {
+  members: Array<[string, CachedMember]>;
+  aiMode: boolean;
+  adminUserId?: string;
+}
+
+/**
+ * JSON-safe snapshot of an entire {@link InMemoryClientStores}: the five
+ * libsignal protocol stores (each via its own `toJSON`) plus the three
+ * client-only collections flattened to arrays. Rehydrated by
+ * {@link InMemoryClientStores.fromJSON}. This is the unit a durable (e.g.
+ * SQLite) store persists so a client can `SignalAiClient.resume(...)` its
+ * exact identity + ratchet state after a restart. The identity store's
+ * `changeLog` is intentionally NOT carried across (matches core behavior).
+ */
+export interface SerializedClientStores {
+  identity: SerializedIdentityStore;
+  sessions: SerializedSessionStore;
+  preKeys: SerializedIdKeyedStore;
+  signedPreKeys: SerializedIdKeyedStore;
+  kyberPreKeys: SerializedIdKeyedStore;
+  seenMsgIds: string[];
+  directory: Array<[string, DirectoryEntry]>;
+  conversations: Array<[string, SerializedCachedConversation]>;
 }
 
 /**
@@ -80,5 +110,45 @@ export class InMemoryClientStores implements ClientStores {
       new InMemorySignedPreKeyStore(),
       new InMemoryKyberPreKeyStore(),
     );
+  }
+
+  /** Flattens this store set (crypto stores + client-only collections) into a JSON-safe {@link SerializedClientStores}. */
+  toJSON(): SerializedClientStores {
+    return {
+      identity: this.identity.toJSON(),
+      sessions: this.session.toJSON(),
+      preKeys: this.preKey.toJSON(),
+      signedPreKeys: this.signedPreKey.toJSON(),
+      kyberPreKeys: this.kyberPreKey.toJSON(),
+      seenMsgIds: [...this.seenMsgIds],
+      directory: [...this.directory.entries()],
+      conversations: [...this.conversations.entries()].map(([id, conv]) => {
+        const serialized: SerializedCachedConversation = {
+          members: [...conv.members.entries()],
+          aiMode: conv.aiMode,
+        };
+        if (conv.adminUserId !== undefined) serialized.adminUserId = conv.adminUserId;
+        return [id, serialized];
+      }),
+    };
+  }
+
+  /** Rebuilds a full client store set from data produced by {@link toJSON}, reusing each crypto store's own `fromJSON`. */
+  static fromJSON(data: SerializedClientStores): InMemoryClientStores {
+    const stores = new InMemoryClientStores(
+      InMemoryIdentityKeyStore.fromJSON(data.identity),
+      InMemorySessionStore.fromJSON(data.sessions),
+      InMemoryPreKeyStore.fromJSON(data.preKeys),
+      InMemorySignedPreKeyStore.fromJSON(data.signedPreKeys),
+      InMemoryKyberPreKeyStore.fromJSON(data.kyberPreKeys),
+    );
+    for (const id of data.seenMsgIds) stores.seenMsgIds.add(id);
+    for (const [userId, entry] of data.directory) stores.directory.set(userId, entry);
+    for (const [convId, conv] of data.conversations) {
+      const rebuilt: CachedConversation = { members: new Map(conv.members), aiMode: conv.aiMode };
+      if (conv.adminUserId !== undefined) rebuilt.adminUserId = conv.adminUserId;
+      stores.conversations.set(convId, rebuilt);
+    }
+    return stores;
   }
 }
