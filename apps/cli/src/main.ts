@@ -23,7 +23,11 @@ interface ParsedArgs {
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const [command, ...rest] = argv;
+  // pnpm forwards the `--` separator (`pnpm … dev -- signup …`) through as a
+  // literal argv token, which would otherwise be read as the subcommand and
+  // print usage. Drop a single leading `--` so the real subcommand is seen.
+  const cleaned = argv[0] === "--" ? argv.slice(1) : argv;
+  const [command, ...rest] = cleaned;
   const flags = new Map<string, string>();
   for (let i = 0; i < rest.length; i++) {
     const token = rest[i];
