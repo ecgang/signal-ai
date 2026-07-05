@@ -32,6 +32,36 @@ availability and membership coordination, but never for confidentiality**:
   authenticated with a per-account bearer token. A token grants a member's own
   traffic only — it is not a member of any thread and cannot read others' traffic.
 
+## The AI member and inference — where plaintext goes
+
+The AI is a **member/endpoint**, not the transport: it holds its own libsignal
+identity keys, is added by explicit invite, appears in the member list, and is
+removable. Messages remain end-to-end encrypted — the relay never sees plaintext
+whether or not the AI is present. But any AI that *reads* messages must decrypt
+them somewhere, and **where** it runs inference determines who else sees that
+plaintext:
+
+- **Remote provider (default, and how the hosted demo runs).** With
+  `AGENT_LLM_BASE_URL` pointed at a third-party OpenAI-compatible API (e.g. NVIDIA
+  NIM / Nemotron, or Anthropic), the agent **forwards the conversation's decrypted
+  text to that provider** on every reply. For those messages, confidentiality
+  extends only as far as your trust in that provider — the plaintext leaves the
+  end-to-end boundary. This is a member you invited relaying content to its model
+  host, not a break in the transport crypto, but the effect on confidentiality is
+  real and is disclosed here explicitly. **Inviting `@ai` is consent to this.**
+- **Local provider (recommended for privacy).** Point `AGENT_LLM_BASE_URL` at a
+  model running on hardware you control (e.g. Ollama on `http://localhost:11434/v1`).
+  The plaintext never leaves that machine — no third party. No code change; the
+  LLM layer is provider-agnostic.
+- **Local knowledge (`AGENT_VAULT_PATH`).** When enabled, retrieved notes are
+  injected into the model's prompt. Under a **remote** provider those notes are
+  sent to the provider along with the messages; under a **local** provider they
+  stay on-device. Enable vault access only with local inference unless you accept
+  sending your notes to the provider.
+
+Full rationale, model sizing, the FHE-infeasibility verdict, and the TEE/P2P
+roadmap are in [`docs/CONFIDENTIAL-INFERENCE.md`](docs/CONFIDENTIAL-INFERENCE.md).
+
 ## At-rest state (SQLite)
 
 The agent persists its full account state to a SQLite database at `AGENT_DB_PATH`
