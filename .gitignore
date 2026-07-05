@@ -1,0 +1,11 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+*.sqlite
+*.sqlite-journal
+.supergoal/
+out/
+coverage/
+.DS_Store
