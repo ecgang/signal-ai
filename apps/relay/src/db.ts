@@ -286,6 +286,15 @@ export async function setAiMode(prisma: PrismaClient, conversationId: string, en
   });
 }
 
+/** Current AI mode for a conversation. `true` when `aiMode === "active"`. */
+export async function getAiMode(prisma: PrismaClient, conversationId: string): Promise<boolean> {
+  const conv = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: { aiMode: true },
+  });
+  return conv?.aiMode === "active";
+}
+
 export interface MemberListEntry {
   userId: string;
   deviceIds: number[];

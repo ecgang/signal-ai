@@ -43,6 +43,7 @@ import {
   inviteMember,
   removeMember,
   setAiMode,
+  getAiMode,
   listMembers,
   listActiveConversationIds,
   enqueueEnvelope,
@@ -316,7 +317,8 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
       return reply.code(403).send({ error: "forbidden" });
     }
     const members = await listMembers(prisma, id);
-    const body: z.infer<typeof ListMembersResponseSchema> = { members };
+    const aiMode = await getAiMode(prisma, id);
+    const body: z.infer<typeof ListMembersResponseSchema> = { members, aiMode };
     return reply.code(200).send(body);
   });
 

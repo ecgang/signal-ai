@@ -484,9 +484,17 @@ export class SignalAiClient {
     await this.transport.setAiMode(this.tokenValue, conversationId, enabled);
     const cached = this.stores.conversations.get(conversationId);
     if (cached) cached.aiMode = enabled;
-    // Self-echo only: the relay has no endpoint to read another client's
-    // ai-mode toggle back, so cross-client observation isn't possible here.
+    // Local self-echo: surface the toggle immediately to THIS client's own
+    // listeners. Cross-client observation is handled separately (post-6A the
+    // relay returns aiMode from GET /conversations/:id/members, so a peer's
+    // listMembers refresh syncs it — see listMembers below); this event is not
+    // that path, it only reflects the caller's own optimistic set.
     this.onSystemEvent?.({ type: "aiModeChanged", conversationId, enabled });
+  }
+
+  /** Current cached AI mode for a conversation (refreshed by {@link listMembers}). */
+  getAiMode(conversationId: string): boolean {
+    return this.stores.conversations.get(conversationId)?.aiMode ?? false;
   }
 
   /**
@@ -495,12 +503,18 @@ export class SignalAiClient {
    * call), and returns the flattened, fingerprint-enriched {@link Member} list.
    */
   async listMembers(conversationId: string): Promise<Member[]> {
-    const raw = await this.transport.listMembers(this.tokenValue, conversationId);
+    const resp = await this.transport.listMembers(this.tokenValue, conversationId);
+    const raw = resp.members;
     let cached = this.stores.conversations.get(conversationId);
     if (!cached) {
-      cached = { members: new Map(), aiMode: false };
+      cached = { members: new Map(), aiMode: resp.aiMode };
       this.stores.conversations.set(conversationId, cached);
     }
+    // Sync mode from the relay on EVERY refresh so a peer's `setAiMode` toggle
+    // propagates here (the phase-6 human→agent path). setAiMode's optimistic
+    // local set is not a regression: the relay is synchronous, so a subsequent
+    // listMembers returns the same value.
+    cached.aiMode = resp.aiMode;
 
     const now = Date.now();
     const seenUserIds = new Set<string>();

@@ -206,10 +206,18 @@ export const FetchPreKeyBundleResponseSchema = z.object({
 });
 export type FetchPreKeyBundleResponse = z.infer<typeof FetchPreKeyBundleResponseSchema>;
 
-/** POST /conversations request: create a new conversation. */
+/**
+ * POST /conversations request: create a new conversation.
+ *
+ * `memberUserIds` may be empty: a conversation always includes its creator
+ * (added as admin by the relay), so a creator-only conversation is well-formed
+ * — this is how the CLI's `/new <name>` starts a thread before anyone is
+ * `/invite`d. Members can only ever be added, never omit the creator, so an
+ * empty initial list is safe and carries no membership-integrity risk.
+ */
 export const CreateConversationRequestSchema = z.object({
   creatorUserId: z.string().min(1),
-  memberUserIds: z.array(z.string().min(1)).min(1),
+  memberUserIds: z.array(z.string().min(1)),
   aiMode: z.boolean().default(false),
 });
 export type CreateConversationRequest = z.infer<typeof CreateConversationRequestSchema>;
@@ -269,5 +277,6 @@ export type ListMembersRequest = z.infer<typeof ListMembersRequestSchema>;
 /** GET /conversations/:id/members response. */
 export const ListMembersResponseSchema = z.object({
   members: z.array(ConversationMemberSchema),
+  aiMode: z.boolean(),
 });
 export type ListMembersResponse = z.infer<typeof ListMembersResponseSchema>;

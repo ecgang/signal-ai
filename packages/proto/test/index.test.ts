@@ -164,8 +164,15 @@ describe("relay REST contract schemas", () => {
       CreateConversationRequestSchema.parse({ creatorUserId: "user-1", memberUserIds: ["user-2"] }),
     ).not.toThrow();
     expect(() => CreateConversationResponseSchema.parse({ conversationId: "conv-1" })).not.toThrow();
+    // An empty member list is valid: the creator is always added by the relay,
+    // so a creator-only conversation is well-formed (the CLI's `/new <name>`
+    // starts a thread before anyone is invited).
     expect(() =>
       CreateConversationRequestSchema.parse({ creatorUserId: "user-1", memberUserIds: [] }),
+    ).not.toThrow();
+    // Still rejects malformed entries (a non-string / empty member id).
+    expect(() =>
+      CreateConversationRequestSchema.parse({ creatorUserId: "user-1", memberUserIds: [""] }),
     ).toThrow();
   });
 
@@ -183,8 +190,12 @@ describe("relay REST contract schemas", () => {
   it("parses listMembers request/response", () => {
     expect(() => ListMembersRequestSchema.parse({ conversationId: "conv-1" })).not.toThrow();
     expect(() =>
-      ListMembersResponseSchema.parse({ members: [{ userId: "user-1", deviceIds: [1, 2] }] }),
+      ListMembersResponseSchema.parse({ members: [{ userId: "user-1", deviceIds: [1, 2] }], aiMode: true }),
     ).not.toThrow();
+    // aiMode is a required wire field (phase 6A): a response missing it is rejected.
+    expect(() =>
+      ListMembersResponseSchema.parse({ members: [{ userId: "user-1", deviceIds: [1, 2] }] }),
+    ).toThrow();
   });
 });
 

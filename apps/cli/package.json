@@ -5,13 +5,26 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "signalai": "dist/main.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run"
   },
   "dependencies": {
-    "@signalai/client-sdk": "workspace:*"
+    "@signalai/client-sdk": "workspace:*",
+    "better-sqlite3": "^12.11.1"
+  },
+  "devDependencies": {
+    "@prisma/client": "^7.8.0",
+    "@signalai/core": "workspace:*",
+    "@signalai/relay": "workspace:*",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/ws": "^8.18.1",
+    "ws": "^8.21.0"
   }
 }

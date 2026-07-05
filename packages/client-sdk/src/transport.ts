@@ -48,7 +48,10 @@ export interface Transport {
   invite(token: string, conversationId: string, userId: string): Promise<void>;
   removeMember(token: string, conversationId: string, userId: string): Promise<void>;
   setAiMode(token: string, conversationId: string, enabled: boolean): Promise<void>;
-  listMembers(token: string, conversationId: string): Promise<ConversationMember[]>;
+  listMembers(
+    token: string,
+    conversationId: string,
+  ): Promise<{ members: ConversationMember[]; aiMode: boolean }>;
   openSocket(): ClientSocket;
 }
 
@@ -136,8 +139,9 @@ export function createHttpWsTransport(relayUrl: string): Transport {
     async listMembers(token, conversationId) {
       const json = (await requestJson(httpBase, "GET", `/conversations/${conversationId}/members`, { token })) as {
         members: ConversationMember[];
+        aiMode: boolean;
       };
-      return json.members;
+      return { members: json.members, aiMode: json.aiMode };
     },
 
     openSocket() {

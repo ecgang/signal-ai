@@ -43,7 +43,7 @@ importers:
         specifier: ^7.8.0
         version: 7.8.0(prisma@7.8.0)(typescript@5.5.4)
       '@signalai/relay':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../relay
       '@types/better-sqlite3':
         specifier: ^7.6.13
@@ -60,6 +60,28 @@ importers:
       '@signalai/client-sdk':
         specifier: workspace:*
         version: link:../../packages/client-sdk
+      better-sqlite3:
+        specifier: ^12.11.1
+        version: 12.11.1
+    devDependencies:
+      '@prisma/client':
+        specifier: ^7.8.0
+        version: 7.8.0(prisma@7.8.0)(typescript@5.5.4)
+      '@signalai/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@signalai/relay':
+        specifier: workspace:*
+        version: link:../relay
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
+      ws:
+        specifier: ^8.21.0
+        version: 8.21.0
 
   apps/relay:
     dependencies:
