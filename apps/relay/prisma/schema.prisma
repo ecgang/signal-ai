@@ -152,10 +152,13 @@ model Membership {
 }
 
 /// CIPHERTEXT + ROUTING METADATA ONLY. `seq` is a relay-assigned monotonic
-/// counter (Postgres bigserial) used purely for drain ordering and
-/// cumulative ack-delete — see db.ts and ws.ts. Deletion on ack IS the
-/// retention policy: once every recipient device has acked, the row is
-/// gone. There is intentionally no plaintext column on this model, ever.
+/// counter (Postgres bigserial) used for drain ordering and per-seq exact
+/// ack-delete — see db.ts. Deletion on ack IS the retention policy: a recipient
+/// device acks each envelope by its own seq and that one row is deleted. It is
+/// deliberately NOT a cumulative `seq <= ack` delete — `seq` is global across
+/// all senders, so cumulative delete would orphan an interleaved earlier seq
+/// from another sender in a group mailbox. There is intentionally no plaintext
+/// column on this model, ever.
 model Envelope {
   id                String   @id @default(cuid())
   conversationId    String

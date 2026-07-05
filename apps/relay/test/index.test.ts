@@ -6,7 +6,7 @@ import type { FastifyInstance } from "fastify";
 import type { PrismaClient } from "@prisma/client";
 import type { PreKeyBundlePublic } from "@signalai/proto";
 import { buildApp } from "../src/index.js";
-import { createPrismaClient } from "../src/db.js";
+import { createPrismaClient, enqueueEnvelope, ackEnvelopes, drainPendingEnvelopes } from "../src/db.js";
 
 /**
  * Relay integration tests. These run against the real Postgres from the
@@ -305,6 +305,55 @@ describe("WebSocket auth transport", () => {
   });
 });
 
+describe("mailbox ack is per-seq exact (group anti-orphaning)", () => {
+  it("acking a later seq leaves an earlier un-acked seq from another sender intact", async () => {
+    const alice = await signup("alice");
+    const bob = await signup("bob");
+    const carol = await signup("carol");
+    const conversationId = await createConversation(alice, [alice.userId, bob.userId, carol.userId]);
+
+    // Carol's group mailbox interleaves two senders: Alice's envelope is
+    // enqueued first (lower global seq), Bob's second (higher seq).
+    const fromAlice = await enqueueEnvelope(prisma, {
+      conversationId,
+      recipientUserId: carol.userId,
+      recipientDeviceId: 1,
+      senderUserId: alice.userId,
+      senderDeviceId: 1,
+      type: 2,
+      ciphertext: Buffer.from("from-alice").toString("base64"),
+    });
+    const fromBob = await enqueueEnvelope(prisma, {
+      conversationId,
+      recipientUserId: carol.userId,
+      recipientDeviceId: 1,
+      senderUserId: bob.userId,
+      senderDeviceId: 1,
+      type: 2,
+      ciphertext: Buffer.from("from-bob").toString("base64"),
+    });
+    expect(fromBob.seq > fromAlice.seq).toBe(true);
+
+    // Carol finishes Bob's (higher-seq) message first and acks it before she
+    // has processed Alice's. Cumulative `seq <= ack` delete would drop Alice's
+    // still-pending envelope; exact per-seq delete must leave it queued.
+    await ackEnvelopes(prisma, {
+      recipientUserId: carol.userId,
+      recipientDeviceId: 1,
+      conversationId,
+      seq: fromBob.seq,
+    });
+
+    const pending = await drainPendingEnvelopes(prisma, {
+      recipientUserId: carol.userId,
+      recipientDeviceId: 1,
+      conversationIds: [conversationId],
+    });
+    expect(pending.map((e) => e.seq)).toEqual([fromAlice.seq]);
+    expect(Buffer.from(pending[0]!.ciphertext).toString()).toBe("from-alice");
+  });
+});
+
 describe("mailbox store-and-forward", () => {
   it("holds envelopes for an offline recipient and drains them in order on reconnect, deleting on ack", async () => {
     const alice = await signup("alice");
@@ -337,9 +386,15 @@ describe("mailbox store-and-forward", () => {
     expect(delivered.map((d) => d.text)).toEqual(["one", "two", "three"]);
     expect(delivered.map((d) => d.seq)).toEqual([...delivered.map((d) => d.seq)].sort((a, b) => a - b));
 
-    // Bob acks up to the last seq → those envelopes are deleted for good.
-    const lastSeq = delivered[delivered.length - 1]!.seq;
-    bobSock.send({ type: "ack", conversationId, seq: lastSeq });
+    // Bob acks each delivered envelope by its own seq — exactly as the real
+    // client's per-envelope `safeAck` does. Acking is per-seq exact, not
+    // cumulative: a single ack of the last seq deletes only that one row (a
+    // cumulative `seq <= ack` delete would orphan an interleaved earlier seq
+    // from another sender in a group mailbox — see ackEnvelopes + the orphaning
+    // test below).
+    for (const seq of delivered.map((d) => d.seq)) {
+      bobSock.send({ type: "ack", conversationId, seq });
+    }
     await expect
       .poll(async () => prisma.envelope.count({ where: { recipientUserId: bob.userId } }), { timeout: 3000 })
       .toBe(0);

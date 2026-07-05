@@ -17,6 +17,9 @@
       ],
       "@signalai/client-sdk": [
         "./packages/client-sdk/src/index.ts"
+      ],
+      "@signalai/relay": [
+        "./apps/relay/src/index.ts"
       ]
     },
     "strict": true,

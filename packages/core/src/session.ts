@@ -39,6 +39,34 @@ export class SessionManager {
     private readonly stores: CoreStores,
   ) {}
 
+  /**
+   * Serializes every store-mutating libsignal call on this manager. Each of
+   * `signalEncrypt` / `signalDecrypt` / `signalDecryptPreKey` /
+   * `processPreKeyBundle` does an async read-modify-write of the pairwise
+   * session record (getSession → ratchet step → saveSession). A client sends
+   * (encrypt) on its own call path while its inbox chain decrypts
+   * concurrently, so without this lock an encrypt and a decrypt for the SAME
+   * peer can interleave across their `await`s, lose one side's ratchet
+   * advance, and desync the session — after which the next decrypt throws and
+   * (because the client drops undecryptable envelopes) the message is silently
+   * lost. This manifests only under a group's simultaneous cross-peer traffic,
+   * which is exactly why 1:1 flows never hit it. One mutex per local identity
+   * makes each operation atomic w.r.t. the shared stores; no libsignal call
+   * re-enters SessionManager, so it cannot deadlock.
+   */
+  private storeTail: Promise<unknown> = Promise.resolve();
+
+  private runExclusive<T>(op: () => Promise<T>): Promise<T> {
+    const result = this.storeTail.then(op);
+    // Keep the chain alive whether this op resolves or rejects, but hand the
+    // real result (or error) back to this caller.
+    this.storeTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   private get localProtocolAddress(): ProtocolAddress {
     return toProtocolAddress(this.localAddress);
   }
@@ -50,23 +78,27 @@ export class SessionManager {
    * first time it decrypts an incoming PreKey message via {@link decrypt}.
    */
   async establishSession(remote: DeviceAddress, bundle: PreKeyBundle): Promise<void> {
-    await processPreKeyBundle(
-      bundle,
-      toProtocolAddress(remote),
-      this.localProtocolAddress,
-      this.stores.session,
-      this.stores.identity,
+    await this.runExclusive(() =>
+      processPreKeyBundle(
+        bundle,
+        toProtocolAddress(remote),
+        this.localProtocolAddress,
+        this.stores.session,
+        this.stores.identity,
+      ),
     );
   }
 
   /** Encrypts `plaintext` for `remote` using the existing (or just-established) session between the two parties. */
   async encrypt(remote: DeviceAddress, plaintext: Uint8Array): Promise<CiphertextMessage> {
-    return signalEncrypt(
-      plaintext,
-      toProtocolAddress(remote),
-      this.localProtocolAddress,
-      this.stores.session,
-      this.stores.identity,
+    return this.runExclusive(() =>
+      signalEncrypt(
+        plaintext,
+        toProtocolAddress(remote),
+        this.localProtocolAddress,
+        this.stores.session,
+        this.stores.identity,
+      ),
     );
   }
 
@@ -77,27 +109,35 @@ export class SessionManager {
    * is rejected.
    */
   async decrypt(remote: DeviceAddress, type: number, ciphertext: Uint8Array): Promise<Uint8Array> {
-    const remoteAddress = toProtocolAddress(remote);
+    return this.runExclusive(() => {
+      const remoteAddress = toProtocolAddress(remote);
 
-    if (type === CiphertextMessageType.PreKey) {
-      const message = PreKeySignalMessage.deserialize(ciphertext);
-      return signalDecryptPreKey(
-        message,
-        remoteAddress,
-        this.localProtocolAddress,
-        this.stores.session,
-        this.stores.identity,
-        this.stores.preKey,
-        this.stores.signedPreKey,
-        this.stores.kyberPreKey,
-      );
-    }
+      if (type === CiphertextMessageType.PreKey) {
+        const message = PreKeySignalMessage.deserialize(ciphertext);
+        return signalDecryptPreKey(
+          message,
+          remoteAddress,
+          this.localProtocolAddress,
+          this.stores.session,
+          this.stores.identity,
+          this.stores.preKey,
+          this.stores.signedPreKey,
+          this.stores.kyberPreKey,
+        );
+      }
 
-    if (type === CiphertextMessageType.Whisper) {
-      const message = SignalMessage.deserialize(ciphertext);
-      return signalDecrypt(message, remoteAddress, this.localProtocolAddress, this.stores.session, this.stores.identity);
-    }
+      if (type === CiphertextMessageType.Whisper) {
+        const message = SignalMessage.deserialize(ciphertext);
+        return signalDecrypt(
+          message,
+          remoteAddress,
+          this.localProtocolAddress,
+          this.stores.session,
+          this.stores.identity,
+        );
+      }
 
-    throw new Error(`SessionManager.decrypt: unsupported ciphertext type ${type}`);
+      throw new Error(`SessionManager.decrypt: unsupported ciphertext type ${type}`);
+    });
   }
 }

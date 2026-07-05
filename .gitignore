@@ -9,3 +9,6 @@ build/
 out/
 coverage/
 .DS_Store
+v8-compile-cache-*/
+# tsx / esbuild transient transform caches (littered in cwd on source-run)
+tsx-*/

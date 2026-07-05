@@ -1,33 +1,14 @@
-import { Identity } from "@signalai/core";
-import { EnvelopeSchema, type Envelope } from "@signalai/proto";
-
-export interface ClientConfig {
-  relayUrl: string;
-}
-
 /**
- * Thin client-side handle around a relay connection. Full session/crypto
- * state management (CoreStores, SessionManager, GroupFanout) is layered in
- * during client-sdk's own build-out; for now this stub proves the
- * workspace wiring (core + proto) resolves and that a client can hold a
- * real Signal-protocol identity.
+ * @signalai/client-sdk — a headless client for the signal-ai relay. No
+ * cryptography is implemented here: every encrypt/decrypt/session operation
+ * delegates to `@signalai/core`. This package adds the relay REST+WS
+ * transport, connection lifecycle (auto-reconnect/keepalive), a contacts
+ * directory bridging the relay's username-keyed bundle lookup to its
+ * userId-keyed everything-else, conversation/membership caching, and
+ * message send/receive/dedupe on top of that.
  */
-export class SignalAiClient {
-  private readonly identity: Identity;
-
-  constructor(private readonly config: ClientConfig) {
-    this.identity = Identity.generate();
-  }
-
-  get relayUrl(): string {
-    return this.config.relayUrl;
-  }
-
-  get registrationId(): number {
-    return this.identity.registrationId;
-  }
-
-  parseIncomingEnvelope(data: unknown): Envelope {
-    return EnvelopeSchema.parse(data);
-  }
-}
+export * from "./types.js";
+export * from "./stores.js";
+export * from "./transport.js";
+export * from "./connection.js";
+export * from "./client.js";

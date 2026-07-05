@@ -48,7 +48,13 @@ import {
   enqueueEnvelope,
   drainPendingEnvelopes,
   ackEnvelopes,
+  type StoredEnvelope,
 } from "./db.js";
+
+// Re-exported so @signalai/client-sdk's E2E test suite can spin up a real
+// relay + Postgres connection in-process (see packages/client-sdk/test)
+// without duplicating relay bootstrap logic.
+export { createPrismaClient } from "./db.js";
 
 /**
  * The `auth` and `hello` frames are the relay's own WS connection handshake
@@ -86,6 +92,36 @@ const RATE_WINDOW_MS = 10_000;
  * is carried in a request header (not a query string) and never echoed back.
  */
 const WS_BEARER_SUBPROTOCOL = "signalai-bearer";
+
+/** Registry key for a live device connection. */
+const connKey = (userId: string, deviceId: number): string => `${userId}:${deviceId}`;
+
+/**
+ * Renders a stored envelope into a `deliver` frame, validating through the
+ * shared proto schema on the way out (narrows the DB's Int `type` to the
+ * wire's 2|3 and rejects a corrupt row rather than delivering something the
+ * recipient can't decrypt). Used by both the offline drain and the live push.
+ */
+function buildDeliverFrame(env: StoredEnvelope): string {
+  const frame = WsDeliverFrameSchema.parse({
+    type: "deliver",
+    envelope: {
+      conversationId: env.conversationId,
+      senderUserId: env.senderUserId,
+      senderDeviceId: env.senderDeviceId,
+      recipientDeviceId: env.recipientDeviceId,
+      seq: Number(env.seq),
+      ciphertext: Buffer.from(env.ciphertext).toString("base64"),
+      type: env.type,
+    },
+  });
+  return JSON.stringify(frame);
+}
+
+/** A live device connection's delivery sink, registered in `liveSockets` while the socket is open. */
+interface LiveConn {
+  deliver(env: StoredEnvelope): void;
+}
 
 const SignupBodySchema = SignupRequestSchema.extend({
   inviteCode: z.string().min(1),
@@ -270,9 +306,13 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
   // NEVER via a query-string token, which would end up in proxy/access
   // logs. A query-string `token` is rejected outright before upgrade.
   // -------------------------------------------------------------------
+  // Registry of live device connections, so an envelope enqueued for a
+  // currently-connected recipient is pushed immediately instead of waiting for
+  // that recipient to reconnect and drain. Keyed by `${userId}:${deviceId}`.
+  const liveSockets = new Map<string, LiveConn>();
   app.register(async (scoped) => {
     scoped.get("/ws", { websocket: true }, (socket, request) => {
-      void handleWsConnection(scoped, prisma, socket, request);
+      void handleWsConnection(scoped, prisma, socket, request, liveSockets);
     });
   });
 
@@ -293,6 +333,7 @@ async function handleWsConnection(
   prisma: PrismaClient,
   socket: import("ws").WebSocket,
   request: FastifyRequest,
+  liveSockets: Map<string, LiveConn>,
 ): Promise<void> {
   const url = new URL(request.url, "http://localhost");
   if (url.searchParams.has("token")) {
@@ -346,6 +387,24 @@ async function handleWsConnection(
     return false;
   };
 
+  // Live delivery state for THIS device. `draining` marks the window between
+  // sending `ready` and finishing the post-`ready` mailbox drain: envelopes
+  // pushed live from another connection during that window are buffered and
+  // flushed *after* the drain, so a live push can never land ahead of an
+  // older, still-draining envelope (which would deliver out of order). The
+  // recipient dedups by msgId, so an envelope seen in both paths is harmless.
+  let draining = false;
+  let liveBuffer: StoredEnvelope[] = [];
+  const liveConn: LiveConn = {
+    deliver(env) {
+      if (draining) {
+        liveBuffer.push(env);
+      } else if (socket.readyState === socket.OPEN) {
+        socket.send(buildDeliverFrame(env));
+      }
+    },
+  };
+
   const drainAndPush = async (): Promise<void> => {
     if (!authenticated()) return;
     const conversationIds = await listActiveConversationIds(prisma, userId!);
@@ -355,24 +414,21 @@ async function handleWsConnection(
       conversationIds,
     });
     for (const envelope of pending) {
-      // Validate through the shared proto schema on the way out: it narrows
-      // the DB's Int `type` to the wire's 2|3 and rejects a corrupt row
-      // rather than delivering an envelope the recipient can't decrypt.
-      const frame = WsDeliverFrameSchema.parse({
-        type: "deliver",
-        envelope: {
-          conversationId: envelope.conversationId,
-          senderUserId: envelope.senderUserId,
-          senderDeviceId: envelope.senderDeviceId,
-          recipientDeviceId: envelope.recipientDeviceId,
-          seq: Number(envelope.seq),
-          ciphertext: Buffer.from(envelope.ciphertext).toString("base64"),
-          type: envelope.type,
-        },
-      });
-      socket.send(JSON.stringify(frame));
+      if (socket.readyState === socket.OPEN) socket.send(buildDeliverFrame(envelope));
     }
   };
+
+  // Register this connection as the live sink for its device once
+  // authenticated, and clear it on close (only if we're still the current
+  // sink for that key — a reconnect may have replaced us).
+  const registerLive = (): void => {
+    if (authenticated()) liveSockets.set(connKey(userId!, deviceId!), liveConn);
+  };
+  socket.on("close", () => {
+    if (authenticated() && liveSockets.get(connKey(userId!, deviceId!)) === liveConn) {
+      liveSockets.delete(connKey(userId!, deviceId!));
+    }
+  });
 
   // Process one connection's frames strictly in the order they arrived, and
   // only after header-token auth (if any) has resolved — so a `hello`/`send`
@@ -413,7 +469,18 @@ async function handleWsConnection(
         const ok = await onFirstFrames(parsed);
         if (ok && authenticated()) {
           socket.send(JSON.stringify({ type: "ready" }));
+          draining = true;
+          registerLive();
           await drainAndPush();
+          // Flush envelopes that arrived live during the drain, then leave the
+          // buffered window. This tail is synchronous (no await), so no live
+          // push can slip between the flush and clearing `draining`.
+          const buffered = liveBuffer;
+          liveBuffer = [];
+          draining = false;
+          for (const env of buffered) {
+            if (socket.readyState === socket.OPEN) socket.send(buildDeliverFrame(env));
+          }
         }
         return;
       }
@@ -432,7 +499,7 @@ async function handleWsConnection(
         // The send frame is already addressed to exactly one recipient
         // (the client fans a group message out into one frame per recipient
         // device), so recipientUserId comes from the frame, not the sender.
-        await enqueueEnvelope(prisma, {
+        const stored = await enqueueEnvelope(prisma, {
           conversationId: envelope.conversationId,
           recipientUserId: sendFrame.data.recipientUserId,
           recipientDeviceId: envelope.recipientDeviceId,
@@ -441,6 +508,17 @@ async function handleWsConnection(
           type: envelope.type,
           ciphertext: envelope.ciphertext,
         });
+        // Live-push only if the recipient device holds an open connection AND
+        // is still an active member of this conversation. The membership check
+        // mirrors the drain's `listActiveConversationIds` filter — without it a
+        // removed member with a live socket would receive envelopes the drain
+        // refuses, breaking the removal guarantee. Offline or removed
+        // recipients fall through to the persisted row (gated at drain time),
+        // so delivery still recovers for the offline case.
+        const target = liveSockets.get(connKey(sendFrame.data.recipientUserId, envelope.recipientDeviceId));
+        if (target && (await isActiveMember(prisma, envelope.conversationId, sendFrame.data.recipientUserId))) {
+          target.deliver(stored);
+        }
         return;
       }
 
@@ -454,7 +532,7 @@ async function handleWsConnection(
           recipientUserId: userId!,
           recipientDeviceId: deviceId!,
           conversationId: frame.data.conversationId,
-          uptoSeq: BigInt(frame.data.seq),
+          seq: BigInt(frame.data.seq),
         });
         return;
       }

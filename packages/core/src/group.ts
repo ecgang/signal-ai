@@ -25,11 +25,14 @@ function assertEnvelopeCiphertextType(type: number): CiphertextType {
  * with the sender.
  *
  * Bound to one local party's `SessionManager`. Removing a member from a
- * conversation is purely a caller-side decision to stop passing their
- * address into `encryptForMembers` — no key revocation step is needed,
- * because a removed member's existing session simply never receives any
- * further ciphertext, and (as the removal test proves) cannot decrypt
- * ciphertext produced for a different member's independent session either.
+ * conversation is purely a caller-side decision to stop passing their address
+ * into `encryptForMembers` — no key revocation step is needed. A removed
+ * member's pairwise session simply stops receiving ciphertext, and because
+ * every member's envelope is sealed to that member's own pairwise ratchet, a
+ * ciphertext fanned out for one member is not decryptable from any other
+ * member's session. Enforcement of "removed ⇒ no delivery" lives in the
+ * relay's membership gates (live-push + reconnect drain) — which the removal
+ * test exercises directly; this class only decides who to encrypt for.
  */
 export class GroupFanout {
   private readonly seq = new Map<string, number>();

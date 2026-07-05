@@ -13,7 +13,12 @@
   },
   "dependencies": {
     "@signalai/core": "workspace:*",
-    "@signalai/proto": "workspace:*"
+    "@signalai/proto": "workspace:*",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@signalai/relay": "workspace:*",
+    "@types/ws": "^8.18.1"
   },
   "exports": {
     ".": {

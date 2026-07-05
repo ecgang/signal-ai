@@ -373,20 +373,29 @@ export async function drainPendingEnvelopes(
 }
 
 /**
- * Deletion-on-ack IS the retention policy: once a recipient device acks up
- * to `uptoSeq` for a conversation, every envelope at or below that seq for
- * that (conversation, device) is gone for good. There is no replay buffer.
+ * Deletion-on-ack IS the retention policy: a recipient device acks each
+ * envelope by its own `seq` (see the client's `safeAck`), and that ack deletes
+ * exactly that one envelope for the (conversation, device). There is no replay
+ * buffer, and — critically — no cursor: an ack must NOT delete everything at or
+ * below `seq`. `seq` is a single global autoincrement shared by every sender,
+ * so one recipient's group mailbox interleaves seqs from multiple senders. A
+ * range-delete (`seq <= acked`) would drop an earlier-seq envelope from a
+ * *different* sender that the client simply hasn't processed yet (it drains its
+ * inbox serially and acks per-envelope), silently losing a group message.
+ * Anything the client never acks — e.g. an envelope it couldn't decrypt — stays
+ * in the mailbox and is redelivered on the next drain (at-least-once until
+ * acked).
  */
 export async function ackEnvelopes(
   prisma: PrismaClient,
-  params: { recipientUserId: string; recipientDeviceId: number; conversationId: string; uptoSeq: bigint },
+  params: { recipientUserId: string; recipientDeviceId: number; conversationId: string; seq: bigint },
 ): Promise<number> {
   const result = await prisma.envelope.deleteMany({
     where: {
       recipientUserId: params.recipientUserId,
       recipientDeviceId: params.recipientDeviceId,
       conversationId: params.conversationId,
-      seq: { lte: params.uptoSeq },
+      seq: params.seq,
     },
   });
   return result.count;
