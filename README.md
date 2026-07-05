@@ -22,7 +22,7 @@ A pnpm + TypeScript monorepo:
 | `packages/proto` | zod-validated wire + API contract (envelopes, REST, WS frames) |
 | `packages/client-sdk` | headless client used by the CLI, the AI agent, and tests |
 | `apps/relay` | Fastify + Postgres relay: ciphertext store-and-forward, key directory |
-| `apps/agent` | the AI member — a headless client with its own keys + the Claude API |
+| `apps/agent` | the AI member — a headless client with its own keys + a pluggable LLM (provider-agnostic OpenAI-compatible client; default Nemotron, Anthropic also supported) |
 | `apps/cli` | the terminal client (the v0.1 product surface) |
 
 ## Develop
