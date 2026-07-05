@@ -59,6 +59,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@signalai/proto':
+        specifier: workspace:*
+        version: link:../proto
       '@signalapp/libsignal-client':
         specifier: 0.96.4
         version: 0.96.4

@@ -1,4 +1,4 @@
-import { generateIdentity, type GeneratedIdentity } from "@signalai/core";
+import { Identity } from "@signalai/core";
 import { EnvelopeSchema, type Envelope } from "@signalai/proto";
 
 export interface ClientConfig {
@@ -7,15 +7,16 @@ export interface ClientConfig {
 
 /**
  * Thin client-side handle around a relay connection. Full session/crypto
- * state management is layered in during the protocol-integration phase; for
- * now this stub proves the workspace wiring (core + proto) resolves and
- * that a client can hold a real Signal-protocol identity.
+ * state management (CoreStores, SessionManager, GroupFanout) is layered in
+ * during client-sdk's own build-out; for now this stub proves the
+ * workspace wiring (core + proto) resolves and that a client can hold a
+ * real Signal-protocol identity.
  */
 export class SignalAiClient {
-  private readonly identity: GeneratedIdentity;
+  private readonly identity: Identity;
 
   constructor(private readonly config: ClientConfig) {
-    this.identity = generateIdentity();
+    this.identity = Identity.generate();
   }
 
   get relayUrl(): string {

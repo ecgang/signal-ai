@@ -15,11 +15,14 @@ describe("SignalAiClient", () => {
   it("parses envelopes via the shared proto schema", () => {
     const client = new SignalAiClient({ relayUrl: "wss://relay.example.com" });
     const envelope = client.parseIncomingEnvelope({
-      threadId: "thread-1",
-      senderId: "user-1",
-      ciphertext: new Uint8Array([1, 2, 3]),
-      timestamp: Date.now(),
+      conversationId: "conv-1",
+      senderUserId: "user-1",
+      senderDeviceId: 1,
+      recipientDeviceId: 1,
+      seq: 1,
+      ciphertext: "AQID",
+      type: 3,
     });
-    expect(envelope.threadId).toBe("thread-1");
+    expect(envelope.conversationId).toBe("conv-1");
   });
 });
