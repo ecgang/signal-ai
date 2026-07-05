@@ -1,0 +1,24 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: signalai
+    ports:
+      # 5433 on the host to avoid clashing with a locally-installed Postgres.
+      - "5433:5432"
+    volumes:
+      - signalai-db-data:/var/lib/postgresql/data
+      # Creates the separate `signalai_test` database on first init so
+      # integration tests never touch dev data.
+      - ./docker/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d signalai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  signalai-db-data:

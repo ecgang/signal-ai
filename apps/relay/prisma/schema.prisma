@@ -1,0 +1,179 @@
+// signal-ai relay database schema.
+//
+// HARD INVARIANT: this schema stores ciphertext and routing metadata ONLY.
+// No table here may ever gain a plaintext message column — the relay is an
+// untrusted store-and-forward backbone and must never be able to read a
+// conversation's content. See Envelope below.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// A registered relay account. One bearer token per user (not per device);
+/// devices are registered underneath a user via PublishDevice.
+model User {
+  id        String   @id @default(cuid())
+  username  String   @unique
+  /// sha256(token) hex digest. The raw token is returned exactly once, at
+  /// signup, and is never stored or logged.
+  tokenHash String   @unique
+  createdAt DateTime @default(now())
+
+  devices       Device[]
+  memberships   Membership[]
+  createdConvos Conversation[] @relation("ConversationCreator")
+
+  @@map("users")
+}
+
+/// One device identity for a user. `deviceId` is a small integer scoped to
+/// the owning user (device 1, 2, 3, ...), NOT globally unique.
+///
+/// Re-registration under the same (userId, deviceId) with a DIFFERENT
+/// identityKey does not overwrite this row: the old row is closed out via
+/// `replacedAt` and a new row is inserted, so an identity-key change is
+/// always detectable in history instead of silently clobbered. Exactly one
+/// row per (userId, deviceId) has `replacedAt IS NULL` at a time (enforced
+/// in application code inside a transaction, not by a DB constraint, since
+/// Postgres partial-unique-on-null needs a raw index Prisma can't express).
+model Device {
+  id             String    @id @default(cuid())
+  userId         String
+  deviceId       Int
+  identityKey    Bytes
+  registrationId Int
+  createdAt      DateTime  @default(now())
+  replacedAt     DateTime?
+
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  signedPreKeys  SignedPreKey[]
+  kyberPreKeys   KyberPreKey[]
+  oneTimePreKeys OneTimePreKey[]
+
+  @@index([userId, deviceId, replacedAt])
+  @@map("devices")
+}
+
+/// The current signed prekey for a device. Rotated periodically; only the
+/// most recently published row is used to build a bundle (selected by
+/// `createdAt desc`), old rows are kept as harmless history (public key
+/// material only).
+model SignedPreKey {
+  id        String   @id @default(cuid())
+  deviceId  String
+  keyId     Int
+  publicKey Bytes
+  signature Bytes
+  createdAt DateTime @default(now())
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, createdAt])
+  @@map("signed_prekeys")
+}
+
+/// The current Kyber (PQXDH) prekey for a device. Same rotation model as
+/// SignedPreKey.
+model KyberPreKey {
+  id        String   @id @default(cuid())
+  deviceId  String
+  keyId     Int
+  publicKey Bytes
+  signature Bytes
+  createdAt DateTime @default(now())
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, createdAt])
+  @@map("kyber_prekeys")
+}
+
+/// A pool of one-time prekeys for a device. Each row is consumed EXACTLY
+/// ONCE by an atomic `DELETE ... WHERE id = (SELECT ... FOR UPDATE SKIP
+/// LOCKED LIMIT 1) RETURNING *` (see db.ts#consumeOneTimePreKey) so two
+/// concurrent bundle fetches can never hand out the same one-time prekey.
+model OneTimePreKey {
+  id        String   @id @default(cuid())
+  deviceId  String
+  keyId     Int
+  publicKey Bytes
+  createdAt DateTime @default(now())
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId])
+  @@map("one_time_prekeys")
+}
+
+enum AiMode {
+  passive
+  active
+}
+
+model Conversation {
+  id        String   @id @default(cuid())
+  aiMode    AiMode   @default(passive)
+  createdBy String
+  createdAt DateTime @default(now())
+
+  creator     User         @relation("ConversationCreator", fields: [createdBy], references: [id])
+  memberships Membership[]
+  envelopes   Envelope[]
+
+  @@map("conversations")
+}
+
+enum MemberRole {
+  admin
+  member
+}
+
+/// `removedAt IS NULL` = active member. A row is never deleted on removal
+/// (so history/re-invite is cheap); membership CHANGES (invite/remove) are
+/// relay-trusted-boundary operations — see the doc-comment on the
+/// invite/remove route handlers in src/routes/conversations.ts.
+model Membership {
+  id             String     @id @default(cuid())
+  conversationId String
+  userId         String
+  role           MemberRole
+  joinedAt       DateTime   @default(now())
+  removedAt      DateTime?
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, userId, removedAt])
+  @@map("memberships")
+}
+
+/// CIPHERTEXT + ROUTING METADATA ONLY. `seq` is a relay-assigned monotonic
+/// counter (Postgres bigserial) used purely for drain ordering and
+/// cumulative ack-delete — see db.ts and ws.ts. Deletion on ack IS the
+/// retention policy: once every recipient device has acked, the row is
+/// gone. There is intentionally no plaintext column on this model, ever.
+model Envelope {
+  id                String   @id @default(cuid())
+  conversationId    String
+  recipientUserId   String
+  recipientDeviceId Int
+  senderUserId      String
+  senderDeviceId    Int
+  seq               BigInt   @default(autoincrement())
+  /// libsignal CiphertextMessageType (2 = Whisper, 3 = PreKey). Needed to
+  /// round-trip the wire Envelope's `type` field through offline storage —
+  /// without it a queued PreKey message would be reconstituted as a Whisper
+  /// message on drain, breaking the recipient's session establishment.
+  type              Int      @default(2)
+  ciphertext        Bytes
+  createdAt         DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, recipientUserId, recipientDeviceId, seq])
+  @@map("envelopes")
+}

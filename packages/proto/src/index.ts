@@ -82,6 +82,17 @@ export const WsDeliverFrameSchema = z.object({
 });
 export type WsDeliverFrame = z.infer<typeof WsDeliverFrameSchema>;
 
+/**
+ * Relay -> client: the socket is authenticated and bound to a device; any
+ * subsequently-sent frames will be processed. Emitted once, right after the
+ * auth/hello handshake succeeds and before pending envelopes are drained, so
+ * a client knows when it is safe to send (and that its token was accepted).
+ */
+export const WsReadyFrameSchema = z.object({
+  type: z.literal("ready"),
+});
+export type WsReadyFrame = z.infer<typeof WsReadyFrameSchema>;
+
 /** Client -> relay: acknowledge receipt of a delivered Envelope up to `seq`. */
 export const WsAckFrameSchema = z.object({
   type: z.literal("ack"),
@@ -98,11 +109,29 @@ export const WsSubscribeFrameSchema = z.object({
 });
 export type WsSubscribeFrame = z.infer<typeof WsSubscribeFrameSchema>;
 
+/**
+ * Client -> relay: submit one encrypted Envelope for delivery.
+ *
+ * `recipientUserId` is carried here as transport addressing (not inside the
+ * Envelope) because device ids are unique only *within* a user, so the relay
+ * cannot resolve the destination from `recipientDeviceId` alone. A sender
+ * fans a group message out into one send frame per (recipientUserId,
+ * recipientDeviceId); it never appears in the encrypted payload.
+ */
+export const WsSendFrameSchema = z.object({
+  type: z.literal("send"),
+  recipientUserId: z.string().min(1),
+  envelope: EnvelopeSchema,
+});
+export type WsSendFrame = z.infer<typeof WsSendFrameSchema>;
+
 /** The discriminated union of every WS frame kind, keyed on `type`. */
 export const WsFrameSchema = z.discriminatedUnion("type", [
   WsDeliverFrameSchema,
+  WsReadyFrameSchema,
   WsAckFrameSchema,
   WsSubscribeFrameSchema,
+  WsSendFrameSchema,
 ]);
 export type WsFrame = z.infer<typeof WsFrameSchema>;
 
