@@ -13,6 +13,7 @@ import {
 } from "@signalai/client-sdk";
 import { SignalAgent, loadAgentConfig, type AgentConfig } from "../src/index.js";
 import { MockLlmClient } from "../src/llm.js";
+import type { KnowledgeSource } from "../src/knowledge.js";
 
 /**
  * Test harness for `@signalai/agent`. Boots a REAL relay (ephemeral port, real
@@ -146,12 +147,18 @@ export interface BootedAgent {
  */
 export async function bootAgent(
   relayUrl: string,
-  opts: { config?: AgentConfig; llm?: MockLlmClient; configOverrides?: Partial<AgentConfig> } = {},
+  opts: {
+    config?: AgentConfig;
+    llm?: MockLlmClient;
+    configOverrides?: Partial<AgentConfig>;
+    /** Optional knowledge source (vault-aware augmentation); omitted => unchanged legacy behavior. */
+    knowledge?: KnowledgeSource;
+  } = {},
 ): Promise<BootedAgent> {
   const config = opts.config ?? makeAgentConfig(relayUrl, opts.configOverrides);
   const store = await SqliteAgentStore.open(config.dbPath, config.dbKey ? { encryptionKey: config.dbKey } : {});
   const llm = opts.llm ?? new MockLlmClient();
-  const agent = await SignalAgent.create({ config, store, llm });
+  const agent = await SignalAgent.create({ config, store, llm, knowledge: opts.knowledge });
   await agent.boot();
   return { agent, llm, config, store };
 }

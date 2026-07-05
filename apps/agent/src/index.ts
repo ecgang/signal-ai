@@ -7,9 +7,11 @@
 import { SqliteAgentStore } from "@signalai/client-sdk";
 import { SignalAgent, loadAgentConfig } from "./agent.js";
 import { selectLlmClient } from "./llm.js";
+import { selectKnowledgeSource } from "./knowledge.js";
 
 export * from "./llm.js";
 export * from "./agent.js";
+export * from "./knowledge.js";
 
 /** Minimal identity descriptor retained from the phase-0 stub (referenced by existing tests). */
 export interface AgentIdentity {
@@ -26,7 +28,8 @@ export async function startAgent(): Promise<SignalAgent> {
   const config = loadAgentConfig();
   const store = await SqliteAgentStore.open(config.dbPath, config.dbKey ? { encryptionKey: config.dbKey } : {});
   const llm = selectLlmClient();
-  const agent = await SignalAgent.create({ config, store, llm });
+  const knowledge = selectKnowledgeSource();
+  const agent = await SignalAgent.create({ config, store, llm, knowledge });
   await agent.boot();
   return agent;
 }
