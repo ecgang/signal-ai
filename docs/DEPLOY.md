@@ -26,16 +26,30 @@ stage.
 
 ---
 
-## Config-as-code (railway.json)
+## Build config (root `railway.json` + per-service `RAILWAY_DOCKERFILE_PATH`)
 
-Railway config is **per-service**, so each service points at its own file:
+Both services are separate Railway services in the **same** project, deploying
+from the **same** repo. Build config is split in two:
 
-- **relay** → repo-root `railway.json` (Dockerfile path + `/health` healthcheck)
-- **agent** → `apps/agent/railway.json` (Dockerfile path; no HTTP healthcheck)
+- **`railway.json`** (repo root, committed, **service-agnostic**) — only says
+  `build.builder = "DOCKERFILE"` and the restart policy. It deliberately does
+  **not** name a Dockerfile, so it is correct for every service.
+- **`RAILWAY_DOCKERFILE_PATH`** — a **Railway environment variable set
+  per-service** (never committed) that selects which Dockerfile that service
+  builds:
+  - relay service → `RAILWAY_DOCKERFILE_PATH=apps/relay/Dockerfile`
+  - agent service → `RAILWAY_DOCKERFILE_PATH=apps/agent/Dockerfile`
 
-In the Railway dashboard, set the agent service's **Config-as-code path** to
-`apps/agent/railway.json` (or set `RAILWAY_CONFIG_FILE=apps/agent/railway.json`).
-The relay service uses the root `railway.json` by default.
+Set it in the Railway dashboard (service → **Variables**) or via CLI:
+
+```
+railway variables --service relay --set RAILWAY_DOCKERFILE_PATH=apps/relay/Dockerfile
+railway variables --service agent --set RAILWAY_DOCKERFILE_PATH=apps/agent/Dockerfile
+```
+
+There is **no** `apps/agent/railway.json` and no `RAILWAY_CONFIG_FILE` — the
+single root `railway.json` plus each service's `RAILWAY_DOCKERFILE_PATH` is the
+whole mechanism.
 
 ---
 
@@ -59,7 +73,7 @@ The relay service uses the root `railway.json` by default.
 | `AGENT_PROVIDER`    | LLM provider: `openai-compatible` (default) or `anthropic`. |
 | `AGENT_LLM_BASE_URL`| OpenAI-compatible base URL (default NVIDIA NIM `https://integrate.api.nvidia.com/v1`). |
 | `AGENT_LLM_API_KEY` | LLM API key (**secret**). |
-| `AGENT_MODEL`       | Model id. Default is Nemotron (`nvidia/llama-3.1-nemotron-70b-instruct`) for the OpenAI-compatible provider. |
+| `AGENT_MODEL`       | Model id (OpenAI-compatible provider). **Set this explicitly to a model your account can invoke** — listing a model at `/v1/models` does not guarantee it is provisioned for your key (an unprovisioned id returns `404` at call time). A confirmed-working NVIDIA NIM Nemotron for this deploy is `nvidia/llama-3.3-nemotron-super-49b-v1`. |
 | `AGENT_DB_KEY`      | Encryption key for the agent's SQLite state (**secret**). |
 | `AGENT_USERNAME`    | Optional; relay username for the AI member (default `ai`). |
 | `AGENT_HANDLE`      | Optional; mention handle (default `@ai`). |
@@ -101,7 +115,9 @@ and redeploy.
 ## Health & connectivity
 
 - Relay healthcheck: `GET /health` → `200` with `{ db: "ok" }` when Postgres is
-  reachable. Configured in `railway.json`.
+  reachable. The root `railway.json` does not pin a healthcheck path (it stays
+  service-agnostic) — set the relay service's **Healthcheck Path** to `/health`
+  in Railway (service → Settings → Healthcheck) so failed deploys don't go live.
 - WS clients connect to `wss://relay-production-fe4c.up.railway.app/ws`.
 
 ---

@@ -411,6 +411,31 @@ describe("@signalai/cli — Phase 6B acceptance (§4b)", () => {
     });
     expect(orphanRow).not.toBeNull();
   }, 30_000);
+
+  // -- 10 ------------------------------------------------------------------
+  it("10. an invited member's CLI adopts the conversation on first message and can reply (no /new)", async () => {
+    const alice = await bootCli("alice");
+    const bob = await bootCli("bob");
+
+    await alice.app.handleInput("/new team");
+    await alice.app.handleInput(`/invite ${bob.username}`);
+
+    // Bob never ran /new, so before hearing anything he has no active
+    // conversation and an attempt to speak is refused (the pre-fix dead end).
+    expect(bob.app.activeConversationId).toBeUndefined();
+    const refused = await bob.app.handleInput("trying to talk before joining");
+    expect(refused.some((l) => l.text.includes("no active conversation"))).toBe(true);
+
+    // Alice speaks; bob's FIRST inbound message auto-adopts the conversation.
+    await alice.app.handleInput("welcome bob");
+    await waitUntil(() => sawLine(bob.app, "welcome bob"));
+    expect(bob.app.activeConversationId).toBe(alice.app.activeConversationId);
+    expect(sawLine(bob.app, "You joined a conversation")).toBe(true);
+
+    // Now bob replies WITHOUT ever running /new, and alice receives it E2EE.
+    await bob.app.handleInput("hi alice, got it");
+    await waitUntil(() => sawLine(alice.app, "hi alice, got it"));
+  }, 30_000);
 });
 
 /** Opens a raw, one-shot authenticated WS connection and submits a single `send` frame, bypassing SignalAiClient entirely. */

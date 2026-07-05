@@ -324,6 +324,20 @@ export class CliApp {
   private wireHandlers(): void {
     this.client.onMessage = (m): void => {
       if (m.senderUserId === this.client.userId) return; // never echo our own (the SDK already excludes self)
+      // An invited member never runs `/new`, so they have no active conversation
+      // and `sendChat` would reject their replies. The first message they receive
+      // is their cue to join: adopt it as active so the invitee can reply,
+      // `/members`, `/verify`, and manage the AI. Only when nothing is active yet
+      // (a `/new` conversation is never overridden).
+      if (this.activeId === undefined) {
+        this.activeId = m.conversationId;
+        if (!this.labels.has(m.conversationId)) this.labels.set(m.conversationId, shortUserId(m.conversationId));
+        this.emit([
+          this.info(
+            `You joined a conversation (${shortUserId(m.conversationId)}). Type to reply; /members to see who's here.`,
+          ),
+        ]);
+      }
       this.emit([this.msgLine(this.displayName(m.senderUserId), m.text, m.sentAt)]);
       this.persist();
     };
