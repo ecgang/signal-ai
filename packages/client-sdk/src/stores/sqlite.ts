@@ -64,7 +64,7 @@ function estimateTokens(messages: ContextMessage[]): number {
  * or `AGENT_DB_KEY`), every JSON payload column is sealed with AES-256-GCM
  * (node stdlib; key = scrypt(passphrase, per-db salt)). No cryptography is
  * invented — only standard-mode primitives. Without a key the payloads are
- * stored as plaintext JSON (disclosed in `apps/agent/SECURITY.md`). The
+ * stored as plaintext JSON (disclosed in the repo-root `SECURITY.md`). The
  * encrypted/plaintext choice is recorded in `store_meta` and re-opening with a
  * mismatched key fails fast rather than corrupting reads.
  */

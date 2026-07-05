@@ -7,7 +7,7 @@ import { join } from "node:path";
  * an ephemeral relay + a throwaway state dir without touching `process.env`.
  */
 export interface CliConfig {
-  /** Relay base URL (`SIGNALAI_RELAY_URL`, else a localhost default). */
+  /** Relay base URL (`SIGNALAI_RELAY_URL`, else the hosted alpha relay). */
   relayUrl: string;
   /** Directory holding one sqlite file per account (`SIGNALAI_STATE_DIR`, else XDG). */
   stateDir: string;
@@ -33,7 +33,7 @@ function defaultStateDir(env: Record<string, string | undefined>): string {
 /** Builds a {@link CliConfig} from the process environment (see the README for the variable list). */
 export function loadCliConfig(env: Record<string, string | undefined> = process.env): CliConfig {
   return {
-    relayUrl: env.SIGNALAI_RELAY_URL ?? "http://127.0.0.1:8080",
+    relayUrl: env.SIGNALAI_RELAY_URL ?? "https://relay-production-fe4c.up.railway.app",
     stateDir: defaultStateDir(env),
     dbKey: env.SIGNALAI_DB_KEY,
     aiUsername: env.SIGNALAI_AI_USERNAME,

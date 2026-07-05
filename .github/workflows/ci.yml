@@ -6,7 +6,9 @@ on:
   pull_request:
 
 jobs:
-  check:
+  # Compile + static checks need no database, so run them on both OSes
+  # (the primary dev platform is macOS — keep it covered for native builds).
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -26,8 +28,55 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # The Prisma client is generated into the pnpm store (no postinstall hook),
+      # so generate it before anything that imports @prisma/client.
+      - run: pnpm --filter @signalai/relay exec prisma generate
+
       - run: pnpm -r typecheck
 
       - run: pnpm -r lint
 
-      - run: pnpm -r test
+      - run: pnpm -r build
+
+  # Integration tests need Postgres. GitHub service containers only run on Linux
+  # runners, and every suite shares ONE database (each calls resetDb), so tests
+  # run serially (--workspace-concurrency=1) to avoid one suite truncating
+  # another's rows mid-test (which surfaces as spurious 401s).
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: signalai
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d signalai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5433/signalai
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.10.3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter @signalai/relay exec prisma generate
+
+      # Apply the relay's migrations once; all suites share this schema.
+      - run: pnpm --filter @signalai/relay exec prisma migrate deploy
+
+      - run: pnpm -r --workspace-concurrency=1 test

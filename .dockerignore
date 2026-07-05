@@ -1,0 +1,38 @@
+# Keep the Docker build context lean AND correct.
+#
+# CRITICAL: node_modules is excluded so the host's macOS-built native modules
+# (better-sqlite3) never leak into the linux image. `pnpm install` inside the
+# build stage recompiles them for linux. Do NOT remove this line.
+node_modules
+**/node_modules
+
+# Build output — images run from TypeScript source via tsx (paths->source
+# design), so no compiled dist is copied in; it is regenerated in-stage.
+dist
+**/dist
+build
+**/build
+out
+coverage
+
+# VCS / tooling / scratch — irrelevant to the image, large or noisy.
+.git
+.github
+.claude
+.supergoal
+atrest-*
+tsx-*
+v8-compile-cache-*
+
+# Local dev + secrets — never baked into an image.
+.env
+.env.*
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store
+
+# Docs are not needed at runtime.
+docs
+README.md
