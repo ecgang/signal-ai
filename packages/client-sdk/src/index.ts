@@ -9,6 +9,7 @@
  */
 export * from "./types.js";
 export * from "./stores.js";
+export * from "./stores/sqlite.js";
 export * from "./transport.js";
 export * from "./connection.js";
 export * from "./client.js";

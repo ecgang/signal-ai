@@ -5,6 +5,8 @@ build/
 .env.*
 *.sqlite
 *.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 .supergoal/
 out/
 coverage/

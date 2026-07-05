@@ -7,11 +7,19 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run"
   },
   "dependencies": {
     "@signalai/client-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@prisma/client": "^7.8.0",
+    "@signalai/relay": "workspace:*",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/ws": "^8.18.1",
+    "ws": "^8.21.0"
   }
 }
