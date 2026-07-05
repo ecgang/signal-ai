@@ -16,6 +16,31 @@ import {
 /** The honest reassurance printed on AI removal (Liotta): removal is real, not cosmetic. */
 export const AI_REMOVED_LINE = "AI removed — new messages are not encrypted to it.";
 
+/** One member row as the TUI sidebar needs it — a read-only projection, no business logic. */
+export interface SidebarMember {
+  userId: string;
+  /** Resolved display name (username if known, else short userId). */
+  name: string;
+  /** Space-grouped identity-key fingerprint (`formatFingerprint`), or the no-key placeholder. */
+  fingerprint: string;
+  role: "admin" | "member";
+  /** True when this member is the conversation's AI account. */
+  isAi: boolean;
+  /** For the AI member only: whether it is in active (●) vs passive (○) mode. */
+  aiActive: boolean;
+  /** True when the member is verified AND their current fingerprint still matches. */
+  verified: boolean;
+  /** True for the local account (never rendered as verifiable). */
+  isSelf: boolean;
+}
+
+/** The header + member sidebar the TUI paints for the active conversation. */
+export interface ConversationView {
+  conversationId: string;
+  label: string;
+  members: SidebarMember[];
+}
+
 /**
  * The load-bearing honesty note (Liotta, non-negotiable): passive mode does NOT
  * hide the thread from the AI — it is a full member that receives and decrypts
@@ -96,6 +121,40 @@ export class CliApp {
   /** The active conversation id, or `undefined` before `/new` (or a joined conversation). */
   get activeConversationId(): string | undefined {
     return this.activeId;
+  }
+
+  /**
+   * A read-only projection of the active conversation for the TUI header +
+   * member sidebar. Additive and side-effect-free: it reuses the SAME sources
+   * `/members` renders from (`client.listMembers`, `client.getAiMode`, the trust
+   * store) so the sidebar never diverges from the command surface. Returns
+   * `undefined` when nothing is active yet. Async because `listMembers` may
+   * refresh from the relay, exactly like `cmdMembers`.
+   */
+  async conversationView(): Promise<ConversationView | undefined> {
+    const conv = this.activeId;
+    if (conv === undefined) return undefined;
+    const aiUserId = this.trust.getAiMember(conv);
+    const aiActive = this.client.getAiMode(conv);
+    const members = await this.client.listMembers(conv);
+    return {
+      conversationId: conv,
+      label: this.labels.get(conv) ?? shortUserId(conv),
+      members: members.map((m): SidebarMember => {
+        const isAi = m.userId === aiUserId;
+        const isSelf = m.userId === this.client.userId;
+        return {
+          userId: m.userId,
+          name: this.displayName(m.userId),
+          fingerprint: formatFingerprint(m.identityKeyFingerprint),
+          role: m.role,
+          isAi,
+          aiActive: isAi ? aiActive : false,
+          verified: !isSelf && this.trust.isVerified(conv, m.userId, m.identityKeyFingerprint),
+          isSelf,
+        };
+      }),
+    };
   }
 
   // --- input dispatch ------------------------------------------------------
