@@ -26,6 +26,13 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      # node-gyp (better-sqlite3's native build) needs distutils, which was
+      # removed from the Python 3.12 stdlib (PEP 632). macos-latest ships 3.12,
+      # so pin 3.11 to keep the native addon building on every runner.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - run: pnpm install --frozen-lockfile
 
       # The Prisma client is generated into the pnpm store (no postinstall hook),
@@ -71,6 +78,11 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
+
+      # See build job: pin Python 3.11 so node-gyp (better-sqlite3) has distutils.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - run: pnpm install --frozen-lockfile
 
