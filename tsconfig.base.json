@@ -15,6 +15,9 @@
       "@signalai/proto": [
         "./packages/proto/src/index.ts"
       ],
+      "@signalai/membership": [
+        "./packages/membership/src/index.ts"
+      ],
       "@signalai/client-sdk": [
         "./packages/client-sdk/src/index.ts"
       ],

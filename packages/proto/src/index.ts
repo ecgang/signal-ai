@@ -57,12 +57,34 @@ export function parseEnvelope(data: unknown): Envelope {
 // ciphertext, and decrypts back out of one.
 // ---------------------------------------------------------------------------
 
+/**
+ * An authenticated reference to a membership op-log position (Plan 004,
+ * PREREQ-1). `seq` is the log position and `headHash` is the lowercase-hex
+ * SHA-256 of the canonical encoding of the op at that position.
+ *
+ * This rides INSIDE {@link PlaintextMessageSchema} — the ratchet-encrypted,
+ * end-to-end authenticated payload — so it inherits libsignal's sender
+ * authentication for free. It is NEVER added to the cleartext
+ * {@link EnvelopeSchema} envelope, which a node/relay can read and forge.
+ */
+export const MembershipHeadSchema = z.object({
+  seq: z.number().int().nonnegative(),
+  headHash: z.string().min(1),
+});
+export type MembershipHead = z.infer<typeof MembershipHeadSchema>;
+
 /** The plaintext content carried inside a decrypted Envelope. */
 export const PlaintextMessageSchema = z.object({
   msgId: z.string().min(1),
   text: z.string(),
   mentions: z.array(z.string()),
   sentAt: z.number().int().nonnegative(),
+  /**
+   * OPTIONAL on the wire so old ciphertext still parses — but the membership
+   * receiver gate treats an ABSENT head as fail-closed REJECT (Plan 004 §6).
+   * Optional-parse is not default-accept.
+   */
+  membershipHead: MembershipHeadSchema.optional(),
 });
 export type PlaintextMessage = z.infer<typeof PlaintextMessageSchema>;
 

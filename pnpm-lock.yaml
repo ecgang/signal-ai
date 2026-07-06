@@ -175,6 +175,18 @@ importers:
         specifier: 0.96.4
         version: 0.96.4
 
+  packages/membership:
+    dependencies:
+      '@signalai/core':
+        specifier: workspace:*
+        version: link:../core
+      '@signalai/proto':
+        specifier: workspace:*
+        version: link:../proto
+      '@signalapp/libsignal-client':
+        specifier: 0.96.4
+        version: 0.96.4
+
   packages/p2p:
     dependencies:
       hyperdht:
