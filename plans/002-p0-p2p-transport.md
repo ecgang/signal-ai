@@ -79,6 +79,29 @@ existing tests (P0 is additive).
 **Evidence / notes (recorded at P0 execution):**
 - not-exercisable-in-sandbox: real-internet hole-punch untestable (no outbound public DHT); dial-by-pubkey + opaque-byte delivery PROVEN offline via in-process @hyperswarm/testnet
 
+**Real-NAT probe (2026-07-06 — the step-6 deliverable, out-of-sandbox):**
+`packages/p2p/scripts/probe.ts` runs the real listen→dial→echo path against the
+**public mainnet DHT** (no injected bootstrap) — the one thing the offline test can't do.
+Its binary path is smoke-verified end-to-end over a local testnet bootstrap (deterministic
+seed → stable pubkey; 512 opaque bytes round-tripped; `SUCCESS` + exit 0). Run it on two
+machines on **different networks** (not the same LAN) to record the NAT verdict:
+
+```bash
+# Machine A (Eric):
+node_modules/.bin/tsx packages/p2p/scripts/probe.ts listen --seed <hex64>
+#   → prints LISTENING_PUBKEY: <hex64>   (send out-of-band to Dustin)
+# Machine B (Dustin):
+node_modules/.bin/tsx packages/p2p/scripts/probe.ts dial <pubkey-hex64>
+#   → SUCCESS (exit 0) = direct hole-punch works | FAIL (exit 1) = retry with --relay <peer>
+```
+
+| Date | A network | B network | direct? | relayThrough needed? | handshake / echo ms | verdict |
+|------|-----------|-----------|---------|----------------------|---------------------|---------|
+| TODO | | | | | | run Eric↔Dustin |
+
+A `FAIL` is a valid, valuable result: it means symmetric NAT bites → build the `relayThrough`
+auto-fallback (stubbed at `client-sdk/src/transport-p2p.ts`) **before** wiring P2P into any app.
+
 **Acceptance check (Codex-added — validates Plan 001's seam):** `transport-p2p.ts` must
 type-check and function implementing **`MessageTransport` alone** — with **no stub, throw, or
 no-op implementation of `AccountService`, `DirectoryService`, or `MembershipService`**. Assert
