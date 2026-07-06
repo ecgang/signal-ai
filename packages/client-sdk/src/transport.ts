@@ -4,7 +4,7 @@ import type { PreKeyBundlePublic, ConversationMember } from "@signalai/proto";
 /**
  * A thin, mockable duck-type over a WebSocket connection. The real transport
  * wraps the `ws` package; tests could substitute a fake implementation
- * without touching `SignalAiClient`/`WsLink`.
+ * without touching `SignalAiClient`/`DuplexLink`.
  */
 export interface ClientSocket {
   send(data: string): void;
@@ -34,13 +34,43 @@ function wrapNodeSocket(ws: NodeWebSocket): ClientSocket {
   };
 }
 
-/** Everything `SignalAiClient` needs from "the network" — REST calls plus opening a raw socket. Kept behind an interface for testability. */
-export interface Transport {
-  signup(req: { inviteCode: string; username: string }): Promise<{ userId: string; token: string }>;
+/**
+ * The message-delivery plane — opening a raw duplex socket. This is the
+ * ONLY plane a P2P transport (Plan 002's `transport-p2p.ts`) reimplements:
+ * there is no REST `send`, messages/deliveries ride the socket returned
+ * here. Kept separate from the central-authority planes below so a P2P
+ * impl can satisfy this interface alone without stubbing signup/directory/
+ * membership (see docs/design/p2p-transport.md §C).
+ */
+export interface MessageTransport {
+  openSocket(): ClientSocket;
+}
+
+/**
+ * The prekey/device-directory plane (central authority on the relay; in
+ * P2P this becomes DHT-published signed bundles — design open-Q#1, P3).
+ */
+export interface DirectoryService {
   publishDevice(token: string, userId: string, bundle: PreKeyBundlePublic): Promise<void>;
   fetchBundles(token: string, username: string, deviceId?: number): Promise<PreKeyBundlePublic[]>;
   /** Like {@link fetchBundles} but keyed by the opaque `userId` instead of `username` (`GET /users/by-id/:userId/bundle`) — for callers that only know a peer's userId. */
   fetchBundlesByUserId(token: string, userId: string, deviceId?: number): Promise<PreKeyBundlePublic[]>;
+}
+
+/**
+ * The account plane — pure central authority (invite codes, usernames,
+ * bearer tokens). In P2P there is no signup at all: the public key IS the
+ * identity, so this plane is dropped entirely, not reimplemented.
+ */
+export interface AccountService {
+  signup(req: { inviteCode: string; username: string }): Promise<{ userId: string; token: string }>;
+}
+
+/**
+ * The membership plane (central authority on the relay; in P2P this becomes
+ * the founder-signed op-log — Plan 004).
+ */
+export interface MembershipService {
   createConversation(
     token: string,
     req: { creatorUserId: string; memberUserIds: string[]; aiMode: boolean },
@@ -52,8 +82,18 @@ export interface Transport {
     token: string,
     conversationId: string,
   ): Promise<{ members: ConversationMember[]; aiMode: boolean }>;
-  openSocket(): ClientSocket;
 }
+
+/**
+ * Everything `SignalAiClient` needs from "the network" — REST calls plus
+ * opening a raw socket. Kept behind an interface for testability.
+ *
+ * TEMPORARY intersection alias over the four role planes above (P-1,
+ * docs/design/p2p-transport.md §C / §D): preserves every existing import of
+ * `Transport` while the planes are re-drawn internally. `createHttpWsTransport`
+ * is the one concrete impl and satisfies all four planes unchanged.
+ */
+export type Transport = MessageTransport & DirectoryService & AccountService & MembershipService;
 
 class RelayRequestError extends Error {
   constructor(

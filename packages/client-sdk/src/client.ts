@@ -13,7 +13,7 @@ import {
 } from "@signalai/core";
 import { parsePlaintextMessage, type PlaintextMessage, type Envelope, type PreKeyBundlePublic } from "@signalai/proto";
 import { createHttpWsTransport, type Transport } from "./transport.js";
-import { WsLink } from "./connection.js";
+import { DuplexLink } from "./connection.js";
 import { InMemoryClientStores, type ClientStores, type SerializedClientStores } from "./stores.js";
 import type { ConnectionState, Member, SignalAiClientHandlers } from "./types.js";
 
@@ -88,7 +88,7 @@ export class SignalAiClient {
   private tokenValue: string;
   private nextOneTimePreKeyId: number;
   private readonly autoResolveMembersById: boolean;
-  private link: WsLink | undefined;
+  private link: DuplexLink | undefined;
   private connectionStateValue: ConnectionState = "disconnected";
   private inbox: Promise<void> = Promise.resolve();
   private identityChangeLogCursor = 0;
@@ -347,7 +347,7 @@ export class SignalAiClient {
    */
   async connect(): Promise<void> {
     this.link?.disconnect();
-    this.link = new WsLink(this.transport, this.tokenValue, this.deviceId, {
+    this.link = new DuplexLink(this.transport, this.tokenValue, this.deviceId, {
       onReady: () => {},
       onDeliver: (envelope) => this.enqueueIncoming(envelope),
       onStateChange: (state) => {
