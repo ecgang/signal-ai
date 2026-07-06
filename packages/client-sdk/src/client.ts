@@ -25,7 +25,9 @@ import {
   type OpBroadcaster,
   type MembershipOp,
 } from "@signalai/membership";
-import { createHttpWsTransport, type Transport } from "./transport.js";
+import type { Transport } from "./transport.js";
+import { resolveTransport, type TransportMode } from "./transport-select.js";
+import type { P2pTransportOptions } from "./transport-p2p.js";
 import { DuplexLink } from "./connection.js";
 import { InMemoryClientStores, appendMembershipOp, type ClientStores, type SerializedClientStores } from "./stores.js";
 import type { ConnectionState, Member, SignalAiClientHandlers } from "./types.js";
@@ -232,10 +234,12 @@ export class SignalAiClient {
     deviceId?: number;
     stores?: ClientStores;
     transport?: Transport;
+    transportMode?: TransportMode;
+    p2pTransport?: P2pTransportOptions;
     initialOneTimePreKeyCount?: number;
     autoResolveMembersById?: boolean;
   }): Promise<SignalAiClient> {
-    const transport = params.transport ?? createHttpWsTransport(params.relayUrl);
+    const transport = params.transport ?? resolveTransport({ relayUrl: params.relayUrl, mode: params.transportMode, p2p: params.p2pTransport });
     const identity = Identity.generate();
     const deviceId = params.deviceId ?? 1;
     const stores = params.stores ?? InMemoryClientStores.create(identity);
@@ -293,9 +297,11 @@ export class SignalAiClient {
     serializedStores: SerializedClientStores;
     nextOneTimePreKeyId: number;
     transport?: Transport;
+    transportMode?: TransportMode;
+    p2pTransport?: P2pTransportOptions;
     autoResolveMembersById?: boolean;
   }): Promise<SignalAiClient> {
-    const transport = params.transport ?? createHttpWsTransport(params.relayUrl);
+    const transport = params.transport ?? resolveTransport({ relayUrl: params.relayUrl, mode: params.transportMode, p2p: params.p2pTransport });
     const deviceId = params.deviceId ?? 1;
     const identity = Identity.fromSerialized(
       params.serializedIdentity.identityKeyPair,
@@ -350,9 +356,11 @@ export class SignalAiClient {
     deviceId?: number;
     stores?: ClientStores;
     transport?: Transport;
+    transportMode?: TransportMode;
+    p2pTransport?: P2pTransportOptions;
     initialOneTimePreKeyCount?: number;
   }): Promise<SignalAiClient> {
-    const transport = params.transport ?? createHttpWsTransport(params.relayUrl);
+    const transport = params.transport ?? resolveTransport({ relayUrl: params.relayUrl, mode: params.transportMode, p2p: params.p2pTransport });
     const identity = Identity.generate();
     const deviceId = params.deviceId ?? 1;
     const stores = params.stores ?? InMemoryClientStores.create(identity);
@@ -823,13 +831,20 @@ export class SignalAiClient {
     // authoritative *member set* is the local op-log fold. Gate the roster: a userId the relay still lists
     // but the fold does NOT contain has been removed via the op-log (possibly with the relay write lagging
     // or suppressed) and MUST NOT appear in the roster — which also drops it from fan-out (sendRaw builds
-    // targets from this return value). Fall back to the raw relay roster only when we hold no fold for this
-    // conversation (legacy / no-op-log / pre-catch-up), matching the receive gate's own "no chain" posture.
+    // targets from this return value).
+    //
+    // Fail-closed (plans/005): when we hold NO trusted fold for this conversation
+    // (corrupt/unverifiable chain, or a seeded InvitePin the persisted chain no longer matches —
+    // `membershipLogFor` returns undefined for either), do NOT fall through to the raw relay roster.
+    // Returning relay-sourced members here would trust membership the receive gate (`enforceInbound`)
+    // has already rejected fail-closed — the two surfaces must agree. Emit no members instead. aiMode
+    // was already synced above off the relay directory and is unaffected.
     const authoritative = this.membershipLogFor(conversationId)?.members(); // Set<string> | undefined
+    if (authoritative === undefined) return [];
 
     const members: Member[] = [];
     for (const m of raw) {
-      if (authoritative && !authoritative.has(m.userId)) continue; // op-log authority: exclude fold-removed members
+      if (!authoritative.has(m.userId)) continue; // op-log authority: exclude fold-removed members
       const cachedEntry = cached.members.get(m.userId)!;
       for (const deviceId of m.deviceIds) {
         const known = await this.stores.identity.getIdentity(toProtocolAddress({ userId: m.userId, deviceId }));

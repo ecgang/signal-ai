@@ -37,11 +37,12 @@ nonsensical membership methods → big-bang cutover. 001 is what makes this incr
 
 | # | Plan | Phase | Depends on | §F items | Status |
 |---|------|-------|-----------|----------|--------|
-| 001 | Interface split: `Transport`→`MessageTransport`+`DirectoryService`+`AccountService`+`MembershipService`, `WsLink`→`DuplexLink`, no-shared-sender-key test | P-1 | — | F.1 | TODO |
-| 002 | `packages/p2p` hyperswarm wrapper + `transport-p2p.ts` (2nd `MessageTransport`) + acceptance check: implements message plane WITHOUT stubbing account/directory/membership | P0 | 001 | — | TODO |
-| 003 | `apps/relay`→`apps/node` demotion: ciphertext `MailboxService` only, **extract + FENCE authority code (do NOT delete)** | P1 | 001 | F.6 | TODO |
-| 004 | `packages/membership` signed op-log: receiver-side enforcement + genesis re-send **+ authenticated log-head metadata (proto) + latestness/head mechanism**; deletion of relay authority is a 004 postcondition | P2 | 001, 002 | F.2, F.3, F.4 | TODO |
-| 005 | Follow-up (hardening): make `listMembers` fail-closed when the membership fold is `undefined` instead of falling back to the raw relay roster (surfaced by the InvitePin-TOFU Verifier pass) | P2-followup | 004 | F.3 | OPEN |
+| 001 | Interface split: `Transport`→`MessageTransport`+`DirectoryService`+`AccountService`+`MembershipService`, `WsLink`→`DuplexLink`, no-shared-sender-key test | P-1 | — | F.1 | ✅ DONE (merged to main) |
+| 002 | `packages/p2p` hyperswarm wrapper + `transport-p2p.ts` (2nd `MessageTransport`) + acceptance check: implements message plane WITHOUT stubbing account/directory/membership | P0 | 001 | — | ✅ DONE (merged) — offline harness green; real-NAT probe `packages/p2p/scripts/probe.ts` merged (PR #1 `6ef7fa2`), **Eric↔Dustin two-machine run still UNRUN** |
+| 003 | `apps/relay`→`apps/node` demotion: ciphertext `MailboxService` only, **extract + FENCE authority code (do NOT delete)** | P1 | 001 | F.6 | ✅ DONE (merged) — authority FENCED, not deleted (see Phase-D note) |
+| 004 | `packages/membership` signed op-log: receiver-side enforcement + genesis re-send **+ authenticated log-head metadata (proto) + latestness/head mechanism**; deletion of relay authority is a 004 postcondition | P2 | 001, 002 | F.2, F.3, F.4 | ✅ DONE (merged) — op-log wired LIVE A→C (`enforceInbound` fail-closed, roster fold-authoritative); **relay-authority deletion (Phase D) still DEFERRED / human-gated** |
+| 005 | Follow-up (hardening): make `listMembers` fail-closed when the membership fold is `undefined` instead of falling back to the raw relay roster (surfaced by the InvitePin-TOFU Verifier pass) | P2-followup | 004 | F.3 | ✅ DONE (branch `pre-probe-p2p-selector`, **not merged**) — `listMembers` returns `[]` when the fold is `undefined`; `membership-gate.test.ts` V-1/V-2 |
+| — | InvitePin TOFU SDK wiring: pin relay-served genesis out-of-band (`invitePinFor`/`acceptInvitePin`), pin-aware fail-closed `membershipLogFor`, bounded late-join catch-up | P2-followup | 004 | F.3 | ✅ DONE (merged, PR #2 `52e7e06`) |
 
 > **Authority-deletion ordering (do not violate — Codex critical #4):** Plan 003 **only
 > extracts and fences** the relay's membership/authority handlers (marks them
@@ -56,8 +57,19 @@ nonsensical membership methods → big-bang cutover. 001 is what makes this incr
   petname UX. Depends on 002–004 landing first; §F.5 (OTK-reuse / downgrade oracle) is
   resolved there, not here.
 - **NAT-traversal reality check** (design Risk 1): P0 (Plan 002) exists to *find* whether
-  Eric↔Dustin hole-punch works; if symmetric-NAT bites, `relayThrough` fallback is a
-  follow-up not specified here.
+  Eric↔Dustin hole-punch works. The probe tool now exists — `packages/p2p/scripts/probe.ts`
+  (real mainnet-DHT listen→dial→echo, exit 0/1 = `/goal` sensor, smoke-verified over a local
+  testnet). **The two-machine Eric↔Dustin run is still UNRUN — it needs two humans on two
+  different real networks and is the real precondition to wiring P2P into any app.** Both
+  probe branches are now **pre-built** on `pre-probe-p2p-selector` (not merged), so the run
+  is the single last gate: (FAIL) the `relayThrough` auto-fallback is BUILT in
+  `client-sdk/src/transport-p2p.ts` (`openSocket` re-dials the same peer through a
+  caller-supplied relay key on direct-dial timeout/error; default-OFF, unset ⇒ byte-identical);
+  (PASS) a flag-gated P2P transport selector is BUILT in `client-sdk/src/transport-select.ts`
+  (`SIGNALAI_TRANSPORT=p2p`, default-OFF, `apps/cli` untouched — one flip from armed). Honest
+  caveat carried in-code: the selector arms a tested *seam*, not a proven live loop — a live
+  composite send/receive still needs a p2p-aware handshake (the relay `{type:"ready"}` frame a
+  bare hyperswarm socket never sends); that generalization is the remaining app-wiring work.
 - **libsignal signed-prekey-only X3DH** (design open-Q#1): must be answered by code
   inspection before P0's offline-first-contact path; flagged inside Plan 002 as an escape hatch.
 - **ADR 0001 IP-exposure consequence** (§F.7): a one-paragraph doc edit, tracked in the

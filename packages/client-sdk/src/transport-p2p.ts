@@ -38,7 +38,22 @@ export interface P2pTransportOptions {
   nodeOptions?: P2pNodeOptions;
   /** Forwarded to `P2pNode.dial` on every `openSocket()` call — e.g. `relayThrough` for NAT fallback (design §D Phase P0, Risk 1). Not exercised by the offline test harness. */
   dialOptions?: P2pDialOptions;
+  /**
+   * Auto-fallback: if a direct hole-punch doesn't reach `open` within
+   * `fallbackTimeoutMs` (or errors first), transparently re-dial the SAME peer
+   * through this relay peer's public key (hyperdht `relayThrough`, design §D
+   * Risk 1). Default OFF (undefined ⇒ direct-only, no fallback).
+   */
+  relayThrough?: Buffer;
+  /**
+   * How long to wait for a direct dial to reach `open` before triggering the
+   * `relayThrough` fallback. Default 8000. Ignored when `relayThrough` is unset.
+   */
+  fallbackTimeoutMs?: number;
 }
+
+/** Default {@link P2pTransportOptions.fallbackTimeoutMs}: how long a direct dial gets before the `relayThrough` fallback fires. */
+const DEFAULT_FALLBACK_TIMEOUT_MS = 8000;
 
 export interface P2pTransport extends MessageTransport {
   /**
@@ -88,21 +103,83 @@ export function createP2pTransport(options: P2pTransportOptions): P2pTransport {
   }
 
   function openSocket(): ClientSocket {
-    const raw: P2pSocket = node.dial(options.peerPublicKey, options.dialOptions);
     let open = false;
+    let relayAttempted = false;
+    let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+    // Consumer callbacks are STORED (not bound directly to `raw`) so they
+    // survive a `relayThrough` swap: when a failed direct dial is torn down
+    // and re-dialed through the relay, `attach` re-binds these same arrays to
+    // the new underlying socket, and `send()`/`close()` read the CURRENT
+    // `raw` via the `let` closure — the swap is transparent to the consumer.
+    const openCbs: Array<() => void> = [];
+    const messageCbs: Array<(data: string) => void> = [];
+    const closeCbs: Array<(code: number, reason: string) => void> = [];
+    const errorCbs: Array<(err: Error) => void> = [];
+    let raw: P2pSocket;
 
-    // Tracks `open`/flushes the outbox unconditionally, independent of
-    // whether a consumer subscribes via `onOpen` below. Wiring this only
-    // inside `onOpen`'s registration (as an earlier version of this file
-    // did) meant a consumer that called `send()` without ever subscribing
-    // to `onOpen` would queue forever — the raw "open" listener, and hence
-    // `open`/the flush, would never fire. Found via
-    // `packages/client-sdk/test/transport-p2p.test.ts`'s queue-then-flush
-    // test during P0.
-    raw.on("open", () => {
-      open = true;
-      drain.onReady();
-    });
+    function clearFallbackTimer(): void {
+      if (fallbackTimer !== undefined) {
+        clearTimeout(fallbackTimer);
+        fallbackTimer = undefined;
+      }
+    }
+
+    function attach(socket: P2pSocket): void {
+      // The "open" handler tracks `open`/flushes the outbox unconditionally,
+      // independent of whether a consumer subscribes via `onOpen`. Wiring this
+      // only inside `onOpen`'s registration (as an earlier version of this
+      // file did) meant a consumer that called `send()` without ever
+      // subscribing to `onOpen` would queue forever — the raw "open" listener,
+      // and hence `open`/the flush, would never fire. Found via
+      // `packages/client-sdk/test/transport-p2p.test.ts`'s queue-then-flush
+      // test during P0.
+      socket.on("open", () => {
+        open = true;
+        clearFallbackTimer();
+        drain.onReady();
+        for (const cb of openCbs) cb();
+      });
+      socket.on("data", (chunk: Buffer) => {
+        const s = chunk.toString("utf8");
+        for (const cb of messageCbs) cb(s);
+      });
+      socket.on("close", () => {
+        for (const cb of closeCbs) cb(1000, "p2p connection closed");
+      });
+      socket.on("error", (err: Error) => {
+        // A direct dial that errors before opening is the fallback trigger
+        // (alongside the timeout below) — re-dial through the relay ONCE
+        // rather than surfacing the failure. With `relayThrough` unset, or
+        // after the swap, the error propagates to the consumer as before.
+        if (!open && !relayAttempted && options.relayThrough !== undefined) {
+          triggerRelayFallback();
+          return;
+        }
+        for (const cb of errorCbs) cb(err);
+      });
+    }
+
+    function triggerRelayFallback(): void {
+      relayAttempted = true;
+      clearFallbackTimer();
+      try {
+        raw.destroy();
+      } catch {
+        // best-effort teardown of the failed direct socket
+      }
+      raw = node.dial(options.peerPublicKey, { ...options.dialOptions, relayThrough: options.relayThrough });
+      attach(raw);
+    }
+
+    raw = node.dial(options.peerPublicKey, options.dialOptions);
+    attach(raw);
+    if (options.relayThrough !== undefined) {
+      fallbackTimer = setTimeout(() => {
+        if (!open && !relayAttempted) triggerRelayFallback();
+      }, options.fallbackTimeoutMs ?? DEFAULT_FALLBACK_TIMEOUT_MS);
+      // Don't keep the event loop alive purely for a fallback timer.
+      (fallbackTimer as { unref?: () => void }).unref?.();
+    }
 
     const socket: ClientSocket = {
       send(data) {
@@ -110,6 +187,7 @@ export function createP2pTransport(options: P2pTransportOptions): P2pTransport {
         else outbox.push(data);
       },
       close(_code, _reason) {
+        clearFallbackTimer();
         raw.destroy();
       },
       ping() {
@@ -118,16 +196,16 @@ export function createP2pTransport(options: P2pTransportOptions): P2pTransport {
         // on a raw duplex byte stream, so this is intentionally a no-op.
       },
       onOpen(cb) {
-        raw.on("open", cb);
+        openCbs.push(cb);
       },
       onMessage(cb) {
-        raw.on("data", (chunk: Buffer) => cb(chunk.toString("utf8")));
+        messageCbs.push(cb);
       },
       onClose(cb) {
-        raw.on("close", () => cb(1000, "p2p connection closed"));
+        closeCbs.push(cb);
       },
       onError(cb) {
-        raw.on("error", cb);
+        errorCbs.push(cb);
       },
     };
 

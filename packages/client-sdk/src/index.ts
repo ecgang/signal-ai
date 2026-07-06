@@ -12,5 +12,6 @@ export * from "./stores.js";
 export * from "./stores/sqlite.js";
 export * from "./transport.js";
 export * from "./transport-p2p.js";
+export * from "./transport-select.js";
 export * from "./connection.js";
 export * from "./client.js";
