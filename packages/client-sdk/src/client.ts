@@ -733,8 +733,18 @@ export class SignalAiClient {
       }
     }
 
+    // Phase C — op-log is the membership AUTHORITY. The relay round-trip above is the device/aiMode
+    // DIRECTORY (fan-out needs deviceIds the fold doesn't carry; aiMode is relay-single-writer), but the
+    // authoritative *member set* is the local op-log fold. Gate the roster: a userId the relay still lists
+    // but the fold does NOT contain has been removed via the op-log (possibly with the relay write lagging
+    // or suppressed) and MUST NOT appear in the roster — which also drops it from fan-out (sendRaw builds
+    // targets from this return value). Fall back to the raw relay roster only when we hold no fold for this
+    // conversation (legacy / no-op-log / pre-catch-up), matching the receive gate's own "no chain" posture.
+    const authoritative = this.membershipLogFor(conversationId)?.members(); // Set<string> | undefined
+
     const members: Member[] = [];
     for (const m of raw) {
+      if (authoritative && !authoritative.has(m.userId)) continue; // op-log authority: exclude fold-removed members
       const cachedEntry = cached.members.get(m.userId)!;
       for (const deviceId of m.deviceIds) {
         const known = await this.stores.identity.getIdentity(toProtocolAddress({ userId: m.userId, deviceId }));

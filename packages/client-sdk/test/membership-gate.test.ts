@@ -175,3 +175,56 @@ describe("membership gate: receiver-side enforceInbound enforcement (Phase B)", 
     carol.disconnect();
   }, 30_000);
 });
+
+describe("membership gate: listMembers roster is authoritative from the fold (Phase C)", () => {
+  it("C-1': op-log-only-removed member is excluded from listMembers despite the relay still listing them active; remaining members keep enriched deviceIds and aiMode still round-trips", async () => {
+    const alice = await signupClient(relayUrl(), uniqueUsername("alice"));
+    const bob = await signupClient(relayUrl(), uniqueUsername("bob"));
+    const carol = await signupClient(relayUrl(), uniqueUsername("carol"));
+
+    await alice.resolveUser(bob.username);
+    await alice.resolveUser(carol.username);
+    await bob.resolveUser(alice.username);
+    await bob.resolveUser(carol.username);
+    await carol.resolveUser(alice.username);
+    await carol.resolveUser(bob.username);
+
+    const convId = await alice.createConversation([bob.userId, carol.userId]);
+    await bob.listMembers(convId); // drain genesis so bob holds a chain
+    await carol.listMembers(convId); // drain genesis so carol holds a chain (fold gate has something to gate against)
+
+    // op-log-only-remove bob: relay keeps him active (exactly like B-1) — the REST
+    // DELETE is skipped so the relay-listed roster still includes him, isolating
+    // the fold as the ONLY thing that can exclude him from carol's listMembers.
+    await opLogOnlyRemove(alice, convId, bob.userId);
+    await waitUntil(() => (carol.membershipLogFor(convId)?.head().seq ?? -1) >= 1, 10_000);
+
+    // Round-trip aiMode through the relay (single-writer, non-authority toggle)
+    // while bob is gone from the fold, proving the gate doesn't disturb it.
+    await alice.setAiMode(convId, true);
+
+    const carolRoster = await carol.listMembers(convId);
+
+    // Bob: excluded from the roster (fold authority), DESPITE the relay still
+    // listing him as an active member.
+    expect(carolRoster.find((m) => m.userId === bob.userId)).toBeUndefined();
+
+    // Alice + carol: still present, still enriched with non-empty deviceIds —
+    // proving the relay round-trip still supplies the device directory for
+    // members the fold retains.
+    const aliceEntries = carolRoster.filter((m) => m.userId === alice.userId);
+    const carolEntries = carolRoster.filter((m) => m.userId === carol.userId);
+    expect(aliceEntries.length).toBeGreaterThan(0);
+    expect(carolEntries.length).toBeGreaterThan(0);
+    expect(aliceEntries.every((m) => m.deviceId)).toBe(true);
+    expect(carolEntries.every((m) => m.deviceId)).toBe(true);
+
+    // aiMode still round-trips off the relay (relay-single-writer path is
+    // untouched by the fold gate on the returned Member[]).
+    expect(carol.getAiMode(convId)).toBe(true);
+
+    alice.disconnect();
+    bob.disconnect();
+    carol.disconnect();
+  }, 30_000);
+});
