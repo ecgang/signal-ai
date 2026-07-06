@@ -293,3 +293,56 @@ describe("membership gate: listMembers roster is authoritative from the fold (Ph
     carol.disconnect();
   }, 30_000);
 });
+
+describe("membership gate: listMembers fails closed when the fold is unavailable (plans/005)", () => {
+  it("V-1: no trusted fold (retroactive forged pin) ⇒ listMembers returns NO relay-sourced members", async () => {
+    const alice = await signupClient(relayUrl(), uniqueUsername("alice"));
+    const carol = await signupClient(relayUrl(), uniqueUsername("carol"));
+
+    await alice.resolveUser(carol.username);
+    await carol.resolveUser(alice.username);
+
+    const convId = await alice.createConversation([carol.userId]);
+    await alice.listMembers(convId);
+    await carol.listMembers(convId); // carol drains genesis: holds a valid fold whose roster would include alice
+
+    // Retroactively seed a FORGED pin (the plans/005 trigger): membershipLogFor
+    // now re-validates the persisted chain against a genesis-hash it can't match,
+    // so it returns undefined — exactly the receive-gate's fail-closed condition.
+    const realPin = JSON.parse(alice.invitePinFor(convId)) as { genesisHash: string };
+    const g = realPin.genesisHash;
+    const forgedPin = JSON.stringify({ ...realPin, genesisHash: (g[0] === "0" ? "1" : "0") + g.slice(1) });
+    carol.acceptInvitePin(forgedPin);
+    expect(carol.membershipLogFor(convId)).toBeUndefined();
+
+    // With no trusted fold, listMembers must NOT leak the relay-claimed roster.
+    const roster = await carol.listMembers(convId);
+    expect(roster.find((m) => m.userId === alice.userId)).toBeUndefined();
+    expect(roster.length).toBe(0);
+
+    alice.disconnect();
+    carol.disconnect();
+  }, 30_000);
+
+  it("V-2: no regression — with a healthy adopted chain, listMembers still reflects the fold's member set", async () => {
+    const alice = await signupClient(relayUrl(), uniqueUsername("alice"));
+    const carol = await signupClient(relayUrl(), uniqueUsername("carol"));
+
+    await alice.resolveUser(carol.username);
+    await carol.resolveUser(alice.username);
+
+    const convId = await alice.createConversation([carol.userId]);
+    await alice.listMembers(convId);
+    await carol.listMembers(convId);
+
+    const fold = carol.membershipLogFor(convId);
+    expect(fold).not.toBeUndefined();
+
+    const roster = await carol.listMembers(convId);
+    const rosterUserIds = new Set(roster.map((m) => m.userId));
+    expect(rosterUserIds).toEqual(fold!.members());
+
+    alice.disconnect();
+    carol.disconnect();
+  }, 30_000);
+});
