@@ -18,6 +18,9 @@
       "@signalai/client-sdk": [
         "./packages/client-sdk/src/index.ts"
       ],
+      "@signalai/p2p": [
+        "./packages/p2p/src/index.ts"
+      ],
       "@signalai/relay": [
         "./apps/relay/src/index.ts"
       ]

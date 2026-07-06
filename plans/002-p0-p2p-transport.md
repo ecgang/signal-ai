@@ -76,6 +76,9 @@ Done = the harness moves an `EnvelopeSchema` ciphertext A→B by pubkey with no 
 loop, AND the NAT-traversal outcome is recorded. The relay path must still pass all its
 existing tests (P0 is additive).
 
+**Evidence / notes (recorded at P0 execution):**
+- not-exercisable-in-sandbox: real-internet hole-punch untestable (no outbound public DHT); dial-by-pubkey + opaque-byte delivery PROVEN offline via in-process @hyperswarm/testnet
+
 **Acceptance check (Codex-added — validates Plan 001's seam):** `transport-p2p.ts` must
 type-check and function implementing **`MessageTransport` alone** — with **no stub, throw, or
 no-op implementation of `AccountService`, `DirectoryService`, or `MembershipService`**. Assert

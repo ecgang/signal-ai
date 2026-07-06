@@ -1,5 +1,5 @@
 {
-  "name": "@signalai/client-sdk",
+  "name": "@signalai/p2p",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -12,17 +12,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@signalai/core": "workspace:*",
-    "@signalai/p2p": "workspace:*",
-    "@signalai/proto": "workspace:*",
-    "better-sqlite3": "^12.11.1",
-    "ws": "^8.21.0"
+    "hyperdht": "^6.32.0"
   },
   "devDependencies": {
-    "@hyperswarm/testnet": "^3.1.4",
-    "@signalai/relay": "workspace:*",
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/ws": "^8.18.1"
+    "@hyperswarm/testnet": "^3.1.4"
   },
   "exports": {
     ".": {
