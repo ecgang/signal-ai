@@ -176,6 +176,71 @@ describe("membership gate: receiver-side enforceInbound enforcement (Phase B)", 
   }, 30_000);
 });
 
+describe("membership gate: out-of-band InvitePin TOFU on late-join (design §4)", () => {
+  it("D-1: a CORRECT out-of-band pin accepts the matching relay-served genesis — the joiner catches up on first message and delivers a current member's send", async () => {
+    const alice = await signupClient(relayUrl(), uniqueUsername("alice"));
+    const carol = await signupClient(relayUrl(), uniqueUsername("carol"));
+
+    await alice.resolveUser(carol.username);
+    await carol.resolveUser(alice.username);
+
+    const convId = await alice.createConversation([carol.userId]);
+    await alice.listMembers(convId); // creator drains so it can build the pin
+
+    // Inviter hands the joiner the pin OUT OF BAND (here: direct call, not via relay).
+    const pin = alice.invitePinFor(convId);
+    carol.acceptInvitePin(pin);
+
+    const carolMessages = collectMessages(carol);
+
+    // carol has NOT drained — her first inbound message drives the site-B
+    // catch-up, which now rebuilds via forJoiner(pin). The correct pin matches
+    // the relay-served genesis, so the chain adopts and the gate authorizes alice.
+    await alice.send(convId, "hello pinned");
+
+    await waitUntil(() => carolMessages.some((m) => m.text === "hello pinned"), 10_000);
+    expect(carol.membershipLogFor(convId)).not.toBeUndefined();
+    expect([...carol.membershipLogFor(convId)!.members()]).toContain(alice.userId);
+
+    alice.disconnect();
+    carol.disconnect();
+  }, 30_000);
+
+  it("D-2: a FORGED pin (genesis-hash mismatch) makes the joiner REJECT the very same relay-served genesis and drop the sender's message — fail-closed, proving the pin is load-bearing", async () => {
+    const alice = await signupClient(relayUrl(), uniqueUsername("alice"));
+    const carol = await signupClient(relayUrl(), uniqueUsername("carol"));
+
+    await alice.resolveUser(carol.username);
+    await carol.resolveUser(alice.username);
+
+    const convId = await alice.createConversation([carol.userId]);
+    await alice.listMembers(convId);
+
+    // Same conversation, same honest relay genesis as D-1 — but the joiner seeds
+    // a pin whose genesisHash is tampered (still valid hex). The out-of-band pin
+    // is the trust root, so the mismatch means the relay-served genesis is NOT
+    // the one the joiner was invited to → reject, not trust.
+    const realPin = JSON.parse(alice.invitePinFor(convId)) as { genesisHash: string };
+    const g = realPin.genesisHash;
+    const forgedPin = JSON.stringify({ ...realPin, genesisHash: (g[0] === "0" ? "1" : "0") + g.slice(1) });
+    carol.acceptInvitePin(forgedPin);
+
+    const carolMessages = collectMessages(carol);
+
+    await alice.send(convId, "should be rejected");
+
+    // Exceed the bounded site-B catch-up window (OP_CATCHUP_TIMEOUT_MS = 3000):
+    // every drained op is rolled back by the pin mismatch, so no chain ever
+    // persists and the gate drops the message fail-closed.
+    await new Promise((resolve) => setTimeout(resolve, 3500));
+    expect(carolMessages.length).toBe(0);
+    expect(carol.membershipLogFor(convId)).toBeUndefined();
+
+    alice.disconnect();
+    carol.disconnect();
+  }, 30_000);
+});
+
 describe("membership gate: listMembers roster is authoritative from the fold (Phase C)", () => {
   it("C-1': op-log-only-removed member is excluded from listMembers despite the relay still listing them active; remaining members keep enriched deviceIds and aiMode still round-trips", async () => {
     const alice = await signupClient(relayUrl(), uniqueUsername("alice"));
