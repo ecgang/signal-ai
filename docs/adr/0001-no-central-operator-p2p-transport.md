@@ -105,6 +105,24 @@ box; it **strips the box of its metadata visibility** and makes it self-hostable
 - **Negative / cost:** a real transport-layer rebuild (prekeys, membership, availability);
   eventual consistency replaces relay-ordered simplicity; "AI always in the loop" becomes a
   paid-by-self-hosting property rather than a default.
+- **§F.7 — IP exposure to contacts (the discretion trade-off P2P does *not* remove).**
+  Direct, hole-punched P2P connects two peers by public key over their real network paths,
+  so **each peer's IP address is visible to the peer it connects to** — i.e. to your
+  contacts, and to any device you exchange messages with. This is not a regression the
+  central operator had: the hosted relay is the *only* party that ever saw a user's IP, and
+  two users never saw each other's. The P2P pivot therefore **trades "one operator sees
+  every IP" for "your counterparties see your IP."** That is a genuine improvement in
+  discretion *against an operator we run*, but it is emphatically **not anonymity**:
+  removing the central operator does nothing to hide network-layer identity from the person
+  on the other end of the conversation, and a malicious contact (or one whose device is
+  compromised) can learn your approximate location and ISP from the connection alone. Do not
+  describe P2P as "more private" without this qualifier. **Mitigations, none of them
+  complete:** the `relayThrough` fallback (§ "NOT removed by P2P alone", item 2) routes a
+  session through a relay so the counterparty sees the relay's address rather than yours;
+  running your own always-on node interposes that node on the path for the same effect; both
+  substitute a chosen intermediary for direct exposure rather than eliminating exposure.
+  Network-layer anonymity (Tor/onion routing, mixnets) is **out of scope** for this ADR and
+  is not provided. The honest public framing is "no central operator," never "anonymous."
 - **Honest scope:** this ADR records a **direction**, not a shipped capability. Until the
   spike lands, the accurate public statement is: *"signal-ai runs on a ciphertext-only
   hosted relay today; a no-central-operator P2P transport is the roadmap end-state."* Do
