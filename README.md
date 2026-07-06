@@ -1,16 +1,53 @@
+<div align="center">
+
 # signal-ai
 
-An open-source, end-to-end-encrypted group messenger where an **AI agent is a first-class member of the conversation** — it holds its own Signal-protocol identity keys, is invited into a thread explicitly, appears in the member list like any human, and when it is removed, new messages are simply never encrypted to it again.
+**An end-to-end-encrypted group messenger where an AI agent is a first-class member of the conversation.**
+
+[![release](https://img.shields.io/github/v/release/ecgang/signal-ai?include_prereleases&sort=semver&style=flat-square&label=release&color=6f42c1)](https://github.com/ecgang/signal-ai/releases)
+[![build](https://img.shields.io/github/actions/workflow/status/ecgang/signal-ai/ci.yml?style=flat-square&label=build)](https://github.com/ecgang/signal-ai/actions/workflows/ci.yml)
+[![license: AGPL-3.0](https://img.shields.io/github/license/ecgang/signal-ai?style=flat-square&color=blue)](./LICENSE)
+[![built on libsignal](https://img.shields.io/badge/built%20on-libsignal-3a76f0?style=flat-square)](https://github.com/signalapp/libsignal)
+
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
+![Node.js 20](https://img.shields.io/badge/Node.js%2020-339933?style=for-the-badge&logo=node.js&logoColor=white)
+![pnpm](https://img.shields.io/badge/pnpm-F69220?style=for-the-badge&logo=pnpm&logoColor=white)
+
+</div>
+
+The AI holds its own Signal-protocol identity keys, is invited into a thread explicitly, appears in the member list like any human, and when it is removed, new messages are simply never encrypted to it again.
 
 Built on the official [libsignal](https://github.com/signalapp/libsignal) protocol library. **No cryptography is invented here** — messages are encrypted with the same X3DH/PQXDH + Double Ratchet primitives Signal ships, via `@signalapp/libsignal-client`.
+
+<!-- TODO: add a real screenshot/GIF of the full-screen TUI at docs/assets/tui.png (message pane + member sidebar + input box). Recommended width ~760px. -->
+<div align="center">
+  <img src="docs/assets/tui.png" alt="The signal-ai terminal UI: a message pane, a live member sidebar, and its own input box." width="760">
+  <br>
+  <sub><i>The v0.2 full-screen terminal UI — message pane, live member sidebar, dedicated input box.</i></sub>
+</div>
 
 ## What this is (and what it is not)
 
 - Messages are **pairwise end-to-end encrypted** to every member of a thread, including the AI member. The relay server only ever stores ciphertext.
 - Group **membership is coordinated by the relay** (not by a cryptographic group protocol in this MVP). That is a deliberate, documented trade-off — the honest threat model, including what the relay can and cannot do and what the AI member can see, lives in [`SECURITY.md`](./SECURITY.md).
-- This is a **CLI-first alpha (v0.1)**. A desktop GUI is planned for v0.2.
+- This is a **CLI-first alpha**. `v0.2.0-alpha` ships a full-screen terminal UI; it remains text-only and single-relay.
 
 This README intentionally makes **scoped** claims. It does not claim to match Signal's group-messaging security guarantees, and it does not claim any property is "provable" without pointing you to the exact mechanism and its limits in `SECURITY.md`.
+
+## Try it
+
+**First time and just want to talk?** The [**onboarding guide**](./docs/ONBOARDING.md) has a zero-toolchain path (Docker only) and a one-command dev path — pick one, paste an invite code, and you're in:
+
+```sh
+# Docker — nothing to install but Docker:
+docker build -f apps/cli/Dockerfile -t signalai .
+docker run -it -v signalai-state:/data signalai signup --invite <CODE> --username you
+
+# …or Node 20+, one command:
+./scripts/onboard.sh signup --invite <CODE> --username you
+```
+
+Both talk to the hosted alpha relay by default — no server to run. The detailed walkthrough of what to type once you're in is below.
 
 ## Architecture
 
@@ -23,11 +60,11 @@ A pnpm + TypeScript monorepo:
 | `packages/client-sdk` | headless client used by the CLI, the AI agent, and tests |
 | `apps/relay` | Fastify + Postgres relay: ciphertext store-and-forward, key directory |
 | `apps/agent` | the AI member — a headless client with its own keys + a pluggable LLM (provider-agnostic OpenAI-compatible client; default Nemotron, Anthropic also supported) |
-| `apps/cli` | the terminal client (the v0.1 product surface) |
+| `apps/cli` | the terminal client (the product surface) |
 
 ## Quickstart — use the CLI
 
-This is the v0.1 product surface: a terminal client that talks to the hosted
+This is the product surface: a terminal client that talks to the hosted
 relay. It ships with the hosted relay as its **default**, so you don't need to
 run any server to try it.
 
@@ -88,11 +125,12 @@ pnpm --filter @signalai/cli dev -- login --username dustin
 > what the relay coordinates and what the AI member can see — is in
 > [`SECURITY.md`](./SECURITY.md).
 
-**Known v0.1 limitations:** each CLI tracks **one active conversation** at a
-time (the one you created with `/new`, or the first one you're invited into) —
-there is no `/switch` between multiple conversations yet. A built binary
-(`signalai signup …` via `pnpm --filter @signalai/cli build`) and a desktop GUI
-are planned for v0.2.
+**Known limitations:** each CLI tracks **one active conversation** at a time (the
+one you created with `/new`, or the first one you're invited into) — there is no
+`/switch` between multiple conversations yet. There is **no single-file binary**:
+the client links a native libsignal addon that can't be embedded in one, so the
+zero-toolchain distribution is the [Docker image](./docs/ONBOARDING.md) rather
+than a downloadable executable. A desktop GUI remains on the roadmap.
 
 ## Develop
 
