@@ -1,4 +1,4 @@
-import { createPrismaClient } from "@signalai/relay";
+import { createPrismaClient } from "@signalai/node";
 
 /**
  * Runs ONCE before this package's vitest workers start (Vitest `globalSetup`).

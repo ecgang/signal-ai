@@ -25,7 +25,7 @@
   "devDependencies": {
     "@prisma/client": "^7.8.0",
     "@signalai/core": "workspace:*",
-    "@signalai/relay": "workspace:*",
+    "@signalai/node": "workspace:*",
     "@types/better-sqlite3": "^7.6.13",
     "@types/react": "^19.2.2",
     "@types/ws": "^8.18.1",

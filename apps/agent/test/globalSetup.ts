@@ -1,10 +1,10 @@
-import { createPrismaClient } from "@signalai/relay";
+import { createPrismaClient } from "@signalai/node";
 
 /**
  * Runs ONCE before this package's vitest workers start (Vitest `globalSetup`).
  *
  * Root cause of the cross-package flake: every relay-booting test package
- * (agent, cli, client-sdk, relay) defaulted `DATABASE_URL` to the SAME
+ * (agent, cli, client-sdk, node) defaulted `DATABASE_URL` to the SAME
  * physical database (`signalai`, see each package's `test/helpers.ts`).
  * `pnpm -r run test` runs packages concurrently, so one package's
  * `resetDb()` (`TRUNCATE ... RESTART IDENTITY CASCADE`) could wipe rows a

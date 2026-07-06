@@ -1,7 +1,7 @@
 /**
- * Relay configuration, read once from process.env at startup. Local dev
+ * Node configuration, read once from process.env at startup. Local dev
  * defaults match docker-compose.yml at the repo root so `docker compose up
- * -d db` + `pnpm --filter @signalai/relay dev` works with zero setup.
+ * -d db` + `pnpm --filter @signalai/node dev` works with zero setup.
  */
 export interface RelayConfig {
   port: number;

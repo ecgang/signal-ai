@@ -1,6 +1,19 @@
 /**
- * Relay Fastify app. The relay only ever routes opaque ciphertext envelopes
- * and coordinates group membership — it never sees plaintext or key material.
+ * Plan 003 (P1 node demotion) — `apps/node` (formerly `apps/relay`). This app
+ * still does two distinct things today, and this file is honest about both:
+ *
+ *  1. Ciphertext-only store-and-forward, now extracted into `MailboxService`
+ *     (./mailbox.ts) — ONE opaque-bytes pass-through onto db.ts's envelope
+ *     queries. It never parses `ciphertext` as an `EnvelopeSchema` body and
+ *     never itself reads membership.
+ *  2. Group-membership authority (create/invite/remove/ai-mode/list-members,
+ *     plus the WS send/subscribe membership gates) — STILL LIVE here. Every
+ *     one of those call sites is marked `// AUTHORITY — removed in P2 (Plan
+ *     004); do not extend`: fenced, not deleted. This node is NOT a "blind
+ *     peer" end to end yet — that is a Plan 004 postcondition, once the
+ *     signed, hash-chained membership op-log (design §B.2) is authoritative
+ *     and these handlers are actually removed. Do not describe this app as
+ *     having "zero membership authority" anywhere; it doesn't, today.
  *
  * `buildApp` is the app factory: it wires routes/plugins onto a Fastify
  * instance without binding a port, so tests can exercise it via
@@ -46,11 +59,9 @@ import {
   getAiMode,
   listMembers,
   listActiveConversationIds,
-  enqueueEnvelope,
-  drainPendingEnvelopes,
-  ackEnvelopes,
   type StoredEnvelope,
 } from "./db.js";
+import { MailboxService } from "./mailbox.js";
 
 // Re-exported so @signalai/client-sdk's E2E test suite can spin up a real
 // relay + Postgres connection in-process (see packages/client-sdk/test)
@@ -137,6 +148,12 @@ declare module "fastify" {
 export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInstance {
   const app = Fastify({ logger: false });
   app.decorate("prisma", prisma);
+
+  // The one ciphertext-only, membership-blind piece of this app (Plan 003,
+  // see mailbox.ts). Every call site below still decides scope (which
+  // conversationIds/recipient) via the fenced membership-authority checks
+  // BEFORE calling into it.
+  const mailbox = new MailboxService(prisma);
 
   const inviteLockout = new InviteCodeLockout();
 
@@ -260,6 +277,10 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
     return reply.code(200).send(body);
   });
 
+  // AUTHORITY — removed in P2 (Plan 004); do not extend. Conversation
+  // creation moves to the client-side signed op-log fold (design §B.2);
+  // fenced, not deleted, so the current node keeps working until that
+  // op-log is authoritative.
   app.post("/conversations", async (request, reply) => {
     const parsed = CreateConversationRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid_body" });
@@ -275,6 +296,9 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
     return reply.code(201).send(body);
   });
 
+  // AUTHORITY — removed in P2 (Plan 004); do not extend. invite/remove move
+  // to the client-side signed op-log fold (design §B.2); fenced, not
+  // deleted, until that op-log is authoritative.
   app.post("/conversations/:id/invite", async (request, reply) => {
     const { id } = request.params as { id: string };
     const parsed = InviteMemberRequestSchema.safeParse({ ...(request.body as object), conversationId: id });
@@ -287,6 +311,7 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
     return reply.code(200).send(body);
   });
 
+  // AUTHORITY — removed in P2 (Plan 004); do not extend.
   app.post("/conversations/:id/remove", async (request, reply) => {
     const { id } = request.params as { id: string };
     const parsed = RemoveMemberRequestSchema.safeParse({ ...(request.body as object), conversationId: id });
@@ -299,6 +324,8 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
     return reply.code(200).send(body);
   });
 
+  // AUTHORITY — removed in P2 (Plan 004); do not extend. `aiMode` toggling
+  // moves to the founder-signed op-log (design §B.2); fenced, not deleted.
   app.patch("/conversations/:id/ai-mode", async (request, reply) => {
     const { id } = request.params as { id: string };
     const parsed = SetAiModeRequestSchema.safeParse({ ...(request.body as object), conversationId: id });
@@ -311,6 +338,9 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
     return reply.code(200).send(body);
   });
 
+  // AUTHORITY — removed in P2 (Plan 004); do not extend. `listMembers`
+  // becomes a local fold over the signed op-log on the client (design
+  // §B.2, §C) — no server round-trip. Fenced, not deleted.
   app.get("/conversations/:id/members", async (request, reply) => {
     const { id } = request.params as { id: string };
     if (!(await isActiveMember(prisma, id, request.principal!.userId))) {
@@ -334,7 +364,7 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
   const liveSockets = new Map<string, LiveConn>();
   app.register(async (scoped) => {
     scoped.get("/ws", { websocket: true }, (socket, request) => {
-      void handleWsConnection(scoped, prisma, socket, request, liveSockets);
+      void handleWsConnection(scoped, prisma, mailbox, socket, request, liveSockets);
     });
   });
 
@@ -353,6 +383,7 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
 async function handleWsConnection(
   app: FastifyInstance,
   prisma: PrismaClient,
+  mailbox: MailboxService,
   socket: import("ws").WebSocket,
   request: FastifyRequest,
   liveSockets: Map<string, LiveConn>,
@@ -429,8 +460,13 @@ async function handleWsConnection(
 
   const drainAndPush = async (): Promise<void> => {
     if (!authenticated()) return;
+    // AUTHORITY — removed in P2 (Plan 004); do not extend. This is the
+    // membership *decision* (which conversationIds are currently active for
+    // this user) that scopes the mailbox drain below — not the mailbox
+    // operation itself. MailboxService.drain takes the resulting id list as
+    // a plain parameter and never computes it.
     const conversationIds = await listActiveConversationIds(prisma, userId!);
-    const pending = await drainPendingEnvelopes(prisma, {
+    const pending = await mailbox.drain({
       recipientUserId: userId!,
       recipientDeviceId: deviceId!,
       conversationIds,
@@ -514,6 +550,10 @@ async function handleWsConnection(
           socket.close(4003, "sender mismatch");
           return;
         }
+        // AUTHORITY — removed in P2 (Plan 004); do not extend. This is the
+        // sender-side membership gate (design §B.2) that decides WHETHER the
+        // mailbox.store call below may proceed; MailboxService itself never
+        // reads membership.
         if (!(await isActiveMember(prisma, envelope.conversationId, userId!))) {
           socket.close(4003, "not an active member");
           return;
@@ -521,7 +561,7 @@ async function handleWsConnection(
         // The send frame is already addressed to exactly one recipient
         // (the client fans a group message out into one frame per recipient
         // device), so recipientUserId comes from the frame, not the sender.
-        const stored = await enqueueEnvelope(prisma, {
+        const stored = await mailbox.store({
           conversationId: envelope.conversationId,
           recipientUserId: sendFrame.data.recipientUserId,
           recipientDeviceId: envelope.recipientDeviceId,
@@ -537,6 +577,10 @@ async function handleWsConnection(
         // refuses, breaking the removal guarantee. Offline or removed
         // recipients fall through to the persisted row (gated at drain time),
         // so delivery still recovers for the offline case.
+        //
+        // AUTHORITY — removed in P2 (Plan 004); do not extend. This
+        // recipient-side membership gate decides whether `target.deliver`
+        // (a plain MailboxService-independent live push) may fire.
         const target = liveSockets.get(connKey(sendFrame.data.recipientUserId, envelope.recipientDeviceId));
         if (target && (await isActiveMember(prisma, envelope.conversationId, sendFrame.data.recipientUserId))) {
           target.deliver(stored);
@@ -550,7 +594,7 @@ async function handleWsConnection(
         return;
       }
       if (frame.data.type === "ack") {
-        await ackEnvelopes(prisma, {
+        await mailbox.ack({
           recipientUserId: userId!,
           recipientDeviceId: deviceId!,
           conversationId: frame.data.conversationId,
@@ -559,6 +603,7 @@ async function handleWsConnection(
         return;
       }
       if (frame.data.type === "subscribe") {
+        // AUTHORITY — removed in P2 (Plan 004); do not extend.
         if (!(await isActiveMember(prisma, frame.data.conversationId, userId!))) {
           socket.close(4003, "not an active member");
           return;

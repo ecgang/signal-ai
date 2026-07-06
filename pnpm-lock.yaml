@@ -42,9 +42,9 @@ importers:
       '@prisma/client':
         specifier: ^7.8.0
         version: 7.8.0(prisma@7.8.0)(typescript@5.5.4)
-      '@signalai/relay':
+      '@signalai/node':
         specifier: workspace:*
-        version: link:../relay
+        version: link:../node
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13
@@ -79,9 +79,9 @@ importers:
       '@signalai/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@signalai/relay':
+      '@signalai/node':
         specifier: workspace:*
-        version: link:../relay
+        version: link:../node
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13
@@ -95,7 +95,7 @@ importers:
         specifier: ^8.21.0
         version: 8.21.0
 
-  apps/relay:
+  apps/node:
     dependencies:
       '@fastify/rate-limit':
         specifier: ^11.1.0
@@ -156,9 +156,9 @@ importers:
       '@hyperswarm/testnet':
         specifier: ^3.1.4
         version: 3.1.4
-      '@signalai/relay':
+      '@signalai/node':
         specifier: workspace:*
-        version: link:../../apps/relay
+        version: link:../../apps/node
       '@types/better-sqlite3':
         specifier: ^7.6.13
         version: 7.6.13

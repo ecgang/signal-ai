@@ -21,8 +21,8 @@
       "@signalai/p2p": [
         "./packages/p2p/src/index.ts"
       ],
-      "@signalai/relay": [
-        "./apps/relay/src/index.ts"
+      "@signalai/node": [
+        "./apps/node/src/index.ts"
       ]
     },
     "strict": true,

@@ -11,7 +11,7 @@ import { createPrismaClient } from "../src/db.js";
 const ADMIN_DATABASE_URL =
   process.env.SIGNALAI_TEST_ADMIN_URL ?? "postgresql://postgres:postgres@localhost:5433/postgres";
 const TEMPLATE_DB = "signalai_test";
-const PACKAGE_DB = "signalai_test_relay";
+const PACKAGE_DB = "signalai_test_node";
 
 export default async function setup(): Promise<void> {
   const admin = createPrismaClient(ADMIN_DATABASE_URL);

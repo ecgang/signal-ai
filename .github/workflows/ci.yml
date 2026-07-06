@@ -37,7 +37,7 @@ jobs:
 
       # The Prisma client is generated into the pnpm store (no postinstall hook),
       # so generate it before anything that imports @prisma/client.
-      - run: pnpm --filter @signalai/relay exec prisma generate
+      - run: pnpm --filter @signalai/node exec prisma generate
 
       - run: pnpm -r typecheck
 
@@ -86,9 +86,9 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm --filter @signalai/relay exec prisma generate
+      - run: pnpm --filter @signalai/node exec prisma generate
 
-      # Apply the relay's migrations once; all suites share this schema.
-      - run: pnpm --filter @signalai/relay exec prisma migrate deploy
+      # Apply the node's migrations once; all suites share this schema.
+      - run: pnpm --filter @signalai/node exec prisma migrate deploy
 
       - run: pnpm -r --workspace-concurrency=1 test

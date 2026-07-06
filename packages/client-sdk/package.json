@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@hyperswarm/testnet": "^3.1.4",
-    "@signalai/relay": "workspace:*",
+    "@signalai/node": "workspace:*",
     "@types/better-sqlite3": "^7.6.13",
     "@types/ws": "^8.18.1"
   },
