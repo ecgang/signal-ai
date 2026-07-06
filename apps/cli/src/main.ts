@@ -17,12 +17,12 @@ import { signupSession, loginSession, type CliSession } from "./session.js";
 import { CliApp } from "./app.js";
 import type { RenderedLine } from "./render.js";
 
-interface ParsedArgs {
+export interface ParsedArgs {
   command: string | undefined;
   flags: Map<string, string>;
 }
 
-function parseArgs(argv: string[]): ParsedArgs {
+export function parseArgs(argv: string[]): ParsedArgs {
   // pnpm forwards the `--` separator (`pnpm … dev -- signup …`) through as a
   // literal argv token, which would otherwise be read as the subcommand and
   // print usage. Drop a single leading `--` so the real subcommand is seen.
