@@ -2,13 +2,16 @@
 
 Static assets referenced by the project docs.
 
-## Wanted: `tui.png`
+## `tui.png`
 
-The top-level `README.md` references `docs/assets/tui.png` — a screenshot (or
-GIF) of the full-screen terminal UI: the message pane, the live member sidebar,
-and the dedicated input box. Until that file exists the README shows a broken
-image.
+The hero image in the top-level `README.md`. It shows the v0.2 full-screen
+terminal UI: the message pane, the live member sidebar (with the AI member's
+`●`/`○` active-vs-passive marker and an out-of-band-verified `✓`), and the
+dedicated input box.
 
-To capture it: run a real session in a TTY (`./scripts/onboard.sh login
---username you`), get into a conversation with a couple of members, and grab a
-~760px-wide screenshot of the terminal. Drop it here as `tui.png`.
+It is a **faithful render of the actual TUI layout** — the frame is transcribed
+directly from `apps/cli/src/tui.tsx` (same borders, colors, markers, and the
+three-line member rows), not a mock invented for marketing. It is a rendered
+representation rather than a photograph of a live relay session; to replace it
+with a real capture, run a session in a TTY (`./scripts/onboard.sh login
+--username you`), get into a conversation, and grab a ~760px-wide screenshot.
