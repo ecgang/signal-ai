@@ -1,6 +1,13 @@
+import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 import createTestnet, { type Testnet } from "@hyperswarm/testnet";
-import { createP2pNode, P2pNode, type P2pNode as P2pNodeType, type P2pSocket } from "@signalai/p2p";
+import {
+  createP2pNode,
+  P2pNode,
+  type P2pDialOptions,
+  type P2pNode as P2pNodeType,
+  type P2pSocket,
+} from "@signalai/p2p";
 import { EnvelopeSchema, parseEnvelope, type Envelope } from "@signalai/proto";
 import { createP2pTransport } from "../src/transport-p2p.js";
 import type { ClientSocket } from "../src/transport.js";
@@ -143,5 +150,82 @@ describe("createP2pTransport (P0, client-sdk)", () => {
     expect(received).toEqual(["frame-1", "frame-2"]);
 
     await server.close();
+  });
+});
+
+/**
+ * relayThrough auto-fallback (design §D Risk 1), exercised with an in-process
+ * fake `node`/socket rather than a real DHT — hole-punch failure is not
+ * reproducible in the offline testnet (loopback peers always connect), so the
+ * failure path is driven by emitting `error` on a controllable fake socket.
+ */
+class FakeSocket extends EventEmitter {
+  readonly written: string[] = [];
+  destroyed = false;
+  write(data: string): boolean {
+    this.written.push(data);
+    return true;
+  }
+  destroy(): void {
+    this.destroyed = true;
+  }
+}
+
+class FakeNode {
+  readonly dials: Array<{ publicKey: Buffer; opts: P2pDialOptions | undefined }> = [];
+  readonly sockets: FakeSocket[] = [];
+  dial(publicKey: Buffer, opts?: P2pDialOptions): P2pSocket {
+    const socket = new FakeSocket();
+    this.dials.push({ publicKey, opts });
+    this.sockets.push(socket);
+    return socket as unknown as P2pSocket;
+  }
+}
+
+describe("createP2pTransport relayThrough auto-fallback (fake node)", () => {
+  const peerPublicKey = Buffer.from("peer-public-key");
+  const relayKey = Buffer.from("relay-peer-key");
+
+  it("relayThrough OFF ⇒ a pre-open dial error surfaces to onError and never re-dials", () => {
+    const node = new FakeNode();
+    const transport = createP2pTransport({ peerPublicKey, node: node as unknown as P2pNodeType });
+
+    const socket = transport.openSocket();
+    const errors: Error[] = [];
+    socket.onError((err) => errors.push(err));
+
+    node.sockets[0].emit("error", new Error("direct dial failed"));
+
+    expect(node.dials.length).toBe(1); // no fallback re-dial
+    expect(errors.map((e) => e.message)).toEqual(["direct dial failed"]);
+  });
+
+  it("relayThrough ON, direct errors ⇒ re-dials through the relay and delivers a pre-swap queued frame once it opens", () => {
+    const node = new FakeNode();
+    const transport = createP2pTransport({
+      peerPublicKey,
+      node: node as unknown as P2pNodeType,
+      relayThrough: relayKey,
+    });
+
+    const socket = transport.openSocket();
+    const errors: Error[] = [];
+    socket.onError((err) => errors.push(err));
+
+    // Queued before the underlying duplex opens (and before the swap).
+    socket.send("frame-before-swap");
+
+    // Direct dial fails before open → triggers the relayThrough fallback.
+    node.sockets[0].emit("error", new Error("hole-punch failed"));
+
+    // A SECOND dial was made, through the configured relay peer's key.
+    expect(node.dials.length).toBe(2);
+    expect(node.dials[1].opts?.relayThrough).toBe(relayKey);
+    expect(node.sockets[0].destroyed).toBe(true); // failed direct socket torn down
+    expect(errors.length).toBe(0); // the pre-open error was absorbed by the fallback
+
+    // Relay socket opens → outbox flushes onto it (send reads the CURRENT raw).
+    node.sockets[1].emit("open");
+    expect(node.sockets[1].written).toEqual(["frame-before-swap"]);
   });
 });
