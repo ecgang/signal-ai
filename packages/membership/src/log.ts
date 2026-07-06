@@ -11,6 +11,59 @@ export interface InvitePin {
   pinnedHead: Head;
 }
 
+const HEX = /^[0-9a-f]+$/;
+
+/**
+ * Serializes an {@link InvitePin} for OUT-OF-BAND transport (invite link, QR,
+ * manual paste) — design §4. It MUST NOT ride the relay: a relay that could
+ * forge the genesis could forge a matching pin too, so pinning only buys
+ * anything when the pin reaches the joiner over a channel the relay does not
+ * control. The payload is plain JSON (all fields are strings/ints).
+ */
+export function serializeInvitePin(pin: InvitePin): string {
+  return JSON.stringify({
+    conversationId: pin.conversationId,
+    genesisHash: pin.genesisHash,
+    pinnedHead: { seq: pin.pinnedHead.seq, headHash: pin.pinnedHead.headHash },
+  });
+}
+
+/**
+ * Parses + fully validates an out-of-band pin string. Throws
+ * {@link IntegrityError} on ANY malformed field: a joiner must refuse a pin it
+ * cannot fully validate, because a silently-ignored garbage pin would collapse
+ * the TOFU guarantee back to blind relay trust without anyone noticing.
+ */
+export function parseInvitePin(serialized: string): InvitePin {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(serialized);
+  } catch {
+    throw new IntegrityError("invite pin is not valid JSON");
+  }
+  if (typeof raw !== "object" || raw === null) throw new IntegrityError("invite pin is not an object");
+  const o = raw as Record<string, unknown>;
+  const head = o.pinnedHead as Record<string, unknown> | null | undefined;
+  if (typeof o.conversationId !== "string" || o.conversationId.length === 0) {
+    throw new IntegrityError("invite pin: missing/invalid conversationId");
+  }
+  if (typeof o.genesisHash !== "string" || !HEX.test(o.genesisHash)) {
+    throw new IntegrityError("invite pin: missing/invalid genesisHash");
+  }
+  if (!head || typeof head !== "object") throw new IntegrityError("invite pin: missing pinnedHead");
+  if (typeof head.seq !== "number" || !Number.isInteger(head.seq) || head.seq < 0) {
+    throw new IntegrityError("invite pin: invalid pinnedHead.seq");
+  }
+  if (typeof head.headHash !== "string" || !HEX.test(head.headHash)) {
+    throw new IntegrityError("invite pin: invalid pinnedHead.headHash");
+  }
+  return {
+    conversationId: o.conversationId,
+    genesisHash: o.genesisHash,
+    pinnedHead: { seq: head.seq, headHash: head.headHash },
+  };
+}
+
 /**
  * A peer's local view of one conversation's membership op-log, with the
  * PREREQ-2 latestness machinery (design §5):

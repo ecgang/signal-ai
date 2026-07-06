@@ -20,7 +20,7 @@ export {
 } from "./canonical.js";
 export { signOp, verifyOpSig, hashOp, toHex, bytesEqual } from "./crypto.js";
 export { verifyChain, fold, apply, headOf, IntegrityError, type Head } from "./chain.js";
-export { MembershipLog, type InvitePin } from "./log.js";
+export { MembershipLog, serializeInvitePin, parseInvitePin, type InvitePin } from "./log.js";
 export { enforceInbound, type ChainProvider, type GateResult } from "./gate.js";
 export {
   OpLogMembershipService,

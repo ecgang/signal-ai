@@ -19,6 +19,9 @@ import {
   decodeOp,
   encodeOp,
   enforceInbound,
+  parseInvitePin,
+  serializeInvitePin,
+  type InvitePin,
   type OpBroadcaster,
   type MembershipOp,
 } from "@signalai/membership";
@@ -29,6 +32,9 @@ import type { ConnectionState, Member, SignalAiClientHandlers } from "./types.js
 
 const DEFAULT_INITIAL_OTP_COUNT = 5;
 const DEFAULT_REPLENISH_BATCH = 5;
+/** Bound for a one-shot late-join op-log catch-up: total wait and poll interval (ms). */
+const OP_CATCHUP_TIMEOUT_MS = 3000;
+const OP_CATCHUP_POLL_MS = 50;
 
 /**
  * Mirrors @signalapp/libsignal-client's `IdentityChange.ReplacedExisting`
@@ -109,6 +115,16 @@ export class SignalAiClient {
    * hot-path callers of `listMembers` can never storm the relay.
    */
   private readonly opCatchupAttempted = new Set<string>();
+  /**
+   * Out-of-band {@link InvitePin}s this session has accepted (design §4 TOFU),
+   * keyed by conversationId. When a pin is present, {@link membershipLogFor}
+   * rebuilds the receiver log via {@link MembershipLog.forJoiner} instead of the
+   * unpinned {@link MembershipLog.open}, so a relay that serves a forged or
+   * truncated genesis is REJECTED at the joiner rather than blindly trusted. A
+   * conversation with NO seeded pin keeps the legacy accepted-risk behavior
+   * (relay-served genesis is trusted) — see {@link acceptInvitePin}.
+   */
+  private readonly joinPins = new Map<string, InvitePin>();
   /**
    * This client's op-log AUTHOR-side seam (design gotcha #1, Phase A.2): only
    * the conversation creator ever successfully authors through it (its
@@ -424,7 +440,53 @@ export class SignalAiClient {
     const cached = this.stores.conversations.get(conversationId);
     if (!cached || cached.membershipOps.length === 0) return undefined;
     const chain: MembershipOp[] = cached.membershipOps.map((encoded) => decodeOp(fromBase64(encoded)));
-    return MembershipLog.open(chain);
+    const pin = this.joinPins.get(conversationId);
+    try {
+      // Pinned joiner (design §4 TOFU): forJoiner enforces genesis-hash match +
+      // pinned (seq, headHash) presence + non-regression, so a forged/truncated
+      // genesis throws here. Unpinned: legacy accepted-risk `open`.
+      if (pin) {
+        const log = MembershipLog.forJoiner(pin);
+        log.ingestChain(chain);
+        return log;
+      }
+      return MembershipLog.open(chain);
+    } catch {
+      // The persisted chain no longer verifies (or violates the seeded pin).
+      // Fail closed: report "no usable chain" so the gate drops rather than
+      // trusting an unverifiable/forged log. Also the roll-back signal for
+      // {@link handleIncomingOp}. Never surface a partial/forged view.
+      return undefined;
+    }
+  }
+
+  /**
+   * One-shot, BOUNDED late-join op-log catch-up (design §4 / late-join gap).
+   * Shared by site A ({@link listMembers}) and site B ({@link handleIncomingEnvelope})
+   * so the 3s busy-poll lives in exactly one place. Fires ONE relay resync
+   * `subscribe` per conversation per session (bounded by {@link opCatchupAttempted}),
+   * then polls — bounded by {@link OP_CATCHUP_TIMEOUT_MS} — until the chain
+   * populates. Cancels early if the link drops mid-wait (a disconnected socket
+   * will never deliver the drained ops, so spinning the full deadline is
+   * pointless). Returns the rebuilt log (pin-aware) or undefined if it never
+   * arrived. Callers still run the fail-closed gate on whatever this returns.
+   */
+  private async awaitChainReady(conversationId: string): Promise<MembershipLog | undefined> {
+    if (
+      !this.link?.isReady ||
+      this.membershipLogFor(conversationId) !== undefined ||
+      this.opCatchupAttempted.has(conversationId)
+    ) {
+      return this.membershipLogFor(conversationId);
+    }
+    this.opCatchupAttempted.add(conversationId);
+    this.link.subscribe(conversationId); // relay drainAndPush: ops from seq 0 (+ envelopes; dedup handles replays).
+    const deadline = Date.now() + OP_CATCHUP_TIMEOUT_MS;
+    while (Date.now() < deadline && this.membershipLogFor(conversationId) === undefined) {
+      if (!this.link?.isReady) break; // link dropped — no ops will arrive; stop waiting.
+      await new Promise((r) => setTimeout(r, OP_CATCHUP_POLL_MS)); // yields to the WS handler that applies inbound op frames.
+    }
+    return this.membershipLogFor(conversationId);
   }
 
   /**
@@ -454,10 +516,11 @@ export class SignalAiClient {
     }
     if (!appendMembershipOp(cached, frame.seq, frame.op)) return; // dup or gap — reconnect re-drain recovers gaps.
 
-    try {
-      this.membershipLogFor(frame.conversationId); // throws if the assembled chain no longer verifies.
-    } catch {
-      cached.membershipOps.pop(); // bad/forged op — roll back so persisted state stays valid.
+    // `membershipLogFor` returns undefined when the assembled chain no longer
+    // verifies OR violates a seeded out-of-band pin (forged/truncated genesis).
+    // Either way roll the op back so persisted state stays valid + pin-consistent.
+    if (this.membershipLogFor(frame.conversationId) === undefined) {
+      cached.membershipOps.pop();
       console.debug(`membership: rejected an op for conversation ${frame.conversationId} at seq ${frame.seq}`);
     }
   }
@@ -620,6 +683,38 @@ export class SignalAiClient {
   }
 
   /**
+   * Builds the OUT-OF-BAND {@link InvitePin} for a joiner (design §4 TOFU): a
+   * serialized `{ conversationId, genesisHash, pinnedHead }` the inviter hands
+   * the joiner over a channel the relay does NOT control (invite link, QR,
+   * safety-number-style exchange). The joiner feeds it to {@link acceptInvitePin}
+   * BEFORE its late-join catch-up so a forged/truncated relay-served genesis is
+   * rejected instead of trusted. Only the conversation CREATOR's client can
+   * produce a pin (its op-log author-side seam holds the chain); a non-creator
+   * call throws — surface it to the caller rather than emitting an unpinnable
+   * invite silently. Returns a string safe to transmit out-of-band (no secrets:
+   * a pin is a public trusted-lower-bound, not a capability).
+   */
+  invitePinFor(conversationId: string): string {
+    if (!this.membershipService) throw new Error("membership op-log unavailable — connect() first");
+    return serializeInvitePin(this.membershipService.inviteFor(conversationId));
+  }
+
+  /**
+   * Seeds an out-of-band {@link InvitePin} received from the inviter (design §4
+   * TOFU). Once seeded, {@link membershipLogFor} rebuilds this conversation's
+   * receiver log via `MembershipLog.forJoiner`, so any relay-served chain whose
+   * genesis hash or pinned `(seq, headHash)` doesn't match is REJECTED (a
+   * forged/truncated genesis fails closed instead of being trusted). Call this
+   * BEFORE joining / receiving the first message. Throws if the pin string is
+   * malformed — a joiner must refuse a pin it cannot fully validate. Absence of
+   * a seeded pin keeps the legacy accepted-risk behavior (relay genesis trusted).
+   */
+  acceptInvitePin(serializedPin: string): void {
+    const pin = parseInvitePin(serializedPin);
+    this.joinPins.set(pin.conversationId, pin);
+  }
+
+  /**
    * Dual-write (Phase A.2), same order as {@link invite}: relay REST first
    * (still the enforcement source of truth this pass — e2e removal tests
    * depend on it), then author + broadcast the matching op-log op. NOTE: the
@@ -711,27 +806,17 @@ export class SignalAiClient {
     // traffic pays nothing.
     //
     // TRUST CAVEATS (honest scope — see SECURITY.md "Membership op-log & late-join"):
-    //   1. The genesis chain served here is whatever the RELAY drains us. A
-    //      malicious relay could serve a forged genesis until the out-of-band
-    //      InvitePin TOFU (genesisHash + pinnedHead, `packages/membership`
-    //      `InvitePin`) is wired in to pin it. Relay-served genesis is TRUSTED
-    //      for now; pinning is the tracked follow-up.
+    //   1. The genesis chain served here is whatever the RELAY drains us. If an
+    //      out-of-band {@link InvitePin} was seeded for this conversation
+    //      ({@link acceptInvitePin}), `membershipLogFor` rebuilds it via
+    //      `MembershipLog.forJoiner` and a forged/truncated genesis is REJECTED
+    //      (design §4 TOFU). With NO seeded pin, relay-served genesis is TRUSTED
+    //      (accepted-risk legacy path) — the pin is out-of-band precisely so the
+    //      relay cannot forge both genesis and pin.
     //   2. A message sent to us in the narrow window between our REST-invite and
     //      this catch-up completing is gate-rejected + dropped (best-effort
     //      late-join delivery), NOT queued for replay.
-    // FOLLOW-UP(InvitePin): pin the relay-served genesis against the out-of-band InvitePin.
-    if (
-      this.link?.isReady &&
-      this.membershipLogFor(conversationId) === undefined &&
-      !this.opCatchupAttempted.has(conversationId)
-    ) {
-      this.opCatchupAttempted.add(conversationId);
-      this.link.subscribe(conversationId); // relay drainAndPush: ops from seq 0 (+ envelopes; dedup handles replays).
-      const deadline = Date.now() + 3000;
-      while (Date.now() < deadline && this.membershipLogFor(conversationId) === undefined) {
-        await new Promise((r) => setTimeout(r, 50)); // yields to the WS handler that applies inbound op frames.
-      }
-    }
+    await this.awaitChainReady(conversationId);
 
     // Phase C — op-log is the membership AUTHORITY. The relay round-trip above is the device/aiMode
     // DIRECTORY (fan-out needs deviceIds the fold doesn't carry; aiMode is relay-single-writer), but the
@@ -865,14 +950,8 @@ export class SignalAiClient {
     // Does NOT weaken the gate: `enforceInbound` below still runs on the fetched
     // chain, so a removed/foreign/absent-head sender is still rejected — only the
     // "no chain at all" case gets a fetch-then-decide instead of an auto-reject.
-    if (log === undefined && this.link?.isReady && !this.opCatchupAttempted.has(envelope.conversationId)) {
-      this.opCatchupAttempted.add(envelope.conversationId);
-      this.link.subscribe(envelope.conversationId); // relay drainAndPush: ops from seq 0 (+ envelopes; dedup handles replays).
-      const deadline = Date.now() + 3000;
-      while (Date.now() < deadline && this.membershipLogFor(envelope.conversationId) === undefined) {
-        await new Promise((r) => setTimeout(r, 50)); // yields to the WS handler that applies inbound op frames.
-      }
-      log = this.membershipLogFor(envelope.conversationId);
+    if (log === undefined) {
+      log = await this.awaitChainReady(envelope.conversationId);
     }
     const verdict = log
       ? enforceInbound(log, envelope.senderUserId, message.membershipHead, () =>
