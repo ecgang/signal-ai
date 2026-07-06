@@ -96,15 +96,17 @@ function print(lines: readonly RenderedLine[]): void {
   for (const l of lines) console.log(l.text);
 }
 
-async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
-  const { session, config } = await bootFromArgs(args);
-
+/**
+ * The original readline shell — retained verbatim as the non-TTY fallback (tests,
+ * pipes, CI) since Ink requires a TTY. In this path readline echoes typed input
+ * AND the app re-renders it, so a sent message appears twice; the TUI path fixes
+ * that by giving input its own box. Do not delete: it is the headless code path.
+ */
+async function runReadline(session: CliSession, app: CliApp): Promise<void> {
   const rl = readline.createInterface({ input: stdin, output: stdout });
-  const app = CliApp.fromSession(session, config);
   app.setSink((lines) => print(lines));
 
-  console.log('connected. type /help for commands, /quit to exit.');
+  console.log("connected. type /help for commands, /quit to exit.");
   let running = true;
   rl.on("SIGINT", () => {
     running = false;
@@ -126,6 +128,22 @@ async function main(): Promise<void> {
   rl.close();
   await session.close();
   process.exit(0);
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+  const { session, config } = await bootFromArgs(args);
+  const app = CliApp.fromSession(session, config);
+
+  // Ink needs a real TTY on BOTH ends; otherwise fall back to the readline shell.
+  if (stdout.isTTY && stdin.isTTY) {
+    const { runTui } = await import("./tui.js");
+    await runTui(session, config, app);
+    // The TUI resolves only after it has closed the session and scheduled exit.
+    return;
+  }
+
+  await runReadline(session, app);
 }
 
 // Only run when executed directly (never on import — keeps the module importable by tests).

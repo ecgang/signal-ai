@@ -17,13 +17,17 @@
   },
   "dependencies": {
     "@signalai/client-sdk": "workspace:*",
-    "better-sqlite3": "^12.11.1"
+    "better-sqlite3": "^12.11.1",
+    "ink": "^6.3.1",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.2.0"
   },
   "devDependencies": {
     "@prisma/client": "^7.8.0",
     "@signalai/core": "workspace:*",
     "@signalai/relay": "workspace:*",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/react": "^19.2.2",
     "@types/ws": "^8.18.1",
     "ws": "^8.21.0"
   }
