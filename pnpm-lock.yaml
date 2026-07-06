@@ -140,6 +140,9 @@ importers:
       '@signalai/core':
         specifier: workspace:*
         version: link:../core
+      '@signalai/membership':
+        specifier: workspace:*
+        version: link:../membership
       '@signalai/p2p':
         specifier: workspace:*
         version: link:../p2p

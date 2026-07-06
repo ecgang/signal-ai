@@ -42,6 +42,8 @@ import {
   WsFrameSchema,
   WsDeliverFrameSchema,
   WsSendFrameSchema,
+  WsOpSendFrameSchema,
+  WsOpDeliverFrameSchema,
 } from "@signalai/proto";
 import { loadConfig, type RelayConfig } from "./config.js";
 import { authenticate, authenticateToken, generateToken, hashToken, InviteCodeLockout } from "./auth.js";
@@ -130,9 +132,59 @@ function buildDeliverFrame(env: StoredEnvelope): string {
   return JSON.stringify(frame);
 }
 
+/**
+ * Renders a stored membership op into an `op-deliver` frame. The `op` string
+ * is opaque base64 — this function (like the relay generally) never decodes
+ * it, only reshapes it into the wire frame.
+ */
+function buildOpDeliverFrame(conversationId: string, seq: number, op: string): string {
+  const frame = WsOpDeliverFrameSchema.parse({ type: "op-deliver", conversationId, seq, op });
+  return JSON.stringify(frame);
+}
+
+/**
+ * In-memory op store: conversationId -> ops indexed by seq (opaque base64).
+ * Availability plane only; authority lives in the signed chain the op body
+ * carries (which this relay never reads). HARDENING: durability (Postgres)
+ * deferred — in-memory means a relay restart loses catch-up state (liveness,
+ * not safety: a client missing ops fails CLOSED at the receiver gate).
+ *
+ * Scoped per `buildApp` invocation (not module-level) so each relay instance
+ * in tests is isolated and `resetDb` between tests doesn't need to touch it.
+ */
+type OpStore = Map<string, string[]>;
+
+/**
+ * Appends `op` at `seq` if it is the next expected position for this
+ * conversation (`seq === arr.length`); a `seq` behind the current length is
+ * an idempotent dupe (ignored), and a `seq` ahead of it is a gap (ignored,
+ * not grown sparse — a well-behaved single author never skips seq). Returns
+ * whether the op was newly stored.
+ */
+function storeOp(store: OpStore, conversationId: string, seq: number, op: string): boolean {
+  const arr = store.get(conversationId) ?? [];
+  let stored = false;
+  if (seq === arr.length) {
+    arr.push(op);
+    stored = true;
+  }
+  store.set(conversationId, arr);
+  return stored;
+}
+
+/** All ops stored for a conversation, in seq order. */
+function drainOps(store: OpStore, conversationId: string): { seq: number; op: string }[] {
+  const arr = store.get(conversationId) ?? [];
+  return arr.map((op, seq) => ({ seq, op }));
+}
+
 /** A live device connection's delivery sink, registered in `liveSockets` while the socket is open. */
 interface LiveConn {
+  /** The userId owning this connection, so op fan-out can filter live sockets by membership. */
+  userId: string;
   deliver(env: StoredEnvelope): void;
+  /** Push one op-deliver frame immediately (no draining-buffer semantics — op order doesn't depend on it). */
+  deliverOp(conversationId: string, seq: number, op: string): void;
 }
 
 const SignupBodySchema = SignupRequestSchema.extend({
@@ -154,6 +206,10 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
   // conversationIds/recipient) via the fenced membership-authority checks
   // BEFORE calling into it.
   const mailbox = new MailboxService(prisma);
+
+  // Membership op-log propagation store (Plan 004 §B.2 transport, Phase A.1).
+  // Blind availability plane — see OpStore doc comment above.
+  const opStore: OpStore = new Map();
 
   const inviteLockout = new InviteCodeLockout();
 
@@ -364,7 +420,7 @@ export function buildApp(config: RelayConfig, prisma: PrismaClient): FastifyInst
   const liveSockets = new Map<string, LiveConn>();
   app.register(async (scoped) => {
     scoped.get("/ws", { websocket: true }, (socket, request) => {
-      void handleWsConnection(scoped, prisma, mailbox, socket, request, liveSockets);
+      void handleWsConnection(scoped, prisma, mailbox, socket, request, liveSockets, opStore);
     });
   });
 
@@ -387,6 +443,7 @@ async function handleWsConnection(
   socket: import("ws").WebSocket,
   request: FastifyRequest,
   liveSockets: Map<string, LiveConn>,
+  opStore: OpStore,
 ): Promise<void> {
   const url = new URL(request.url, "http://localhost");
   if (url.searchParams.has("token")) {
@@ -449,11 +506,19 @@ async function handleWsConnection(
   let draining = false;
   let liveBuffer: StoredEnvelope[] = [];
   const liveConn: LiveConn = {
+    // Populated in registerLive() once auth resolves userId; empty until then
+    // (liveConn is never registered into liveSockets before that point).
+    userId: "",
     deliver(env) {
       if (draining) {
         liveBuffer.push(env);
       } else if (socket.readyState === socket.OPEN) {
         socket.send(buildDeliverFrame(env));
+      }
+    },
+    deliverOp(conversationId, seq, op) {
+      if (socket.readyState === socket.OPEN) {
+        socket.send(buildOpDeliverFrame(conversationId, seq, op));
       }
     },
   };
@@ -474,13 +539,24 @@ async function handleWsConnection(
     for (const envelope of pending) {
       if (socket.readyState === socket.OPEN) socket.send(buildDeliverFrame(envelope));
     }
+    // Op drain: same conversationIds scope as the envelope drain above.
+    // Ordering vs envelopes doesn't matter for ops (idempotent, seq-ordered
+    // per conversation) — just send each conversation's ops in seq order.
+    for (const conversationId of conversationIds) {
+      for (const { seq, op } of drainOps(opStore, conversationId)) {
+        if (socket.readyState === socket.OPEN) socket.send(buildOpDeliverFrame(conversationId, seq, op));
+      }
+    }
   };
 
   // Register this connection as the live sink for its device once
   // authenticated, and clear it on close (only if we're still the current
   // sink for that key — a reconnect may have replaced us).
   const registerLive = (): void => {
-    if (authenticated()) liveSockets.set(connKey(userId!, deviceId!), liveConn);
+    if (authenticated()) {
+      liveConn.userId = userId!;
+      liveSockets.set(connKey(userId!, deviceId!), liveConn);
+    }
   };
   socket.on("close", () => {
     if (authenticated() && liveSockets.get(connKey(userId!, deviceId!)) === liveConn) {
@@ -584,6 +660,27 @@ async function handleWsConnection(
         const target = liveSockets.get(connKey(sendFrame.data.recipientUserId, envelope.recipientDeviceId));
         if (target && (await isActiveMember(prisma, envelope.conversationId, sendFrame.data.recipientUserId))) {
           target.deliver(stored);
+        }
+        return;
+      }
+
+      const opSendFrame = WsOpSendFrameSchema.safeParse(parsed);
+      if (opSendFrame.success) {
+        const { conversationId, seq, op } = opSendFrame.data;
+        // Blind store: the relay never decodes `op` (it is opaque base64 —
+        // see WsOpSendFrameSchema doc comment). Ordering/dedupe is by the
+        // cleartext `seq` field only.
+        storeOp(opStore, conversationId, seq, op);
+        // Fan out to every OTHER live socket whose user is currently an
+        // active member of this conversation. Membership routing hint only
+        // (fenced AUTHORITY helper, same as the envelope path above) — it
+        // decides WHO receives the opaque bytes, never what they mean.
+        const selfKey = connKey(userId!, deviceId!);
+        for (const [key, conn] of liveSockets) {
+          if (key === selfKey) continue;
+          if (await isActiveMember(prisma, conversationId, conn.userId)) {
+            conn.deliverOp(conversationId, seq, op);
+          }
         }
         return;
       }

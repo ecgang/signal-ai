@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@signalai/core": "workspace:*",
+    "@signalai/membership": "workspace:*",
     "@signalai/p2p": "workspace:*",
     "@signalai/proto": "workspace:*",
     "better-sqlite3": "^12.11.1",

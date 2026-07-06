@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { PrismaClient } from "@prisma/client";
@@ -535,5 +537,69 @@ describe("health", () => {
     const res = await app.inject({ method: "GET", url: "/health" });
     expect(res.statusCode).toBe(200);
     expect((res.json() as { db: string }).db).toBe("ok");
+  });
+});
+
+/**
+ * Phase A.1 (Plan 004 §B.2 transport): the relay stores and fans out signed
+ * membership ops as OPAQUE base64 bytes, exactly mirroring the ciphertext
+ * envelope store/forward/drain path above. It never decodes `op` — ordering,
+ * dedupe, and routing all key off the cleartext `seq`/`conversationId` fields
+ * on the frame, never the op body's contents.
+ */
+describe("membership op-log transport (Phase A.1 — relay-blind store/forward)", () => {
+  it("fans an op-send out to another live member as an op-deliver, byte-identical (A-2 relay-blindness)", async () => {
+    const alice = await signup("alice");
+    const bob = await signup("bob");
+    const conversationId = await createConversation(alice, [alice.userId, bob.userId]);
+
+    const aliceSock = new TestSocket();
+    await aliceSock.authWithFrame(alice.token, 1);
+    const bobSock = new TestSocket();
+    await bobSock.authWithFrame(bob.token, 1);
+
+    // Arbitrary opaque bytes — the relay never needs a real signed op to
+    // forward it correctly, because it never looks inside `op`.
+    const op = Buffer.from("arbitrary-opaque-membership-op-bytes").toString("base64");
+    aliceSock.send({ type: "op-send", conversationId, seq: 0, op });
+
+    const delivered = await bobSock.waitFor((m) => m.type === "op-deliver");
+    expect(delivered).toEqual({ type: "op-deliver", conversationId, seq: 0, op });
+
+    aliceSock.close();
+    bobSock.close();
+  });
+
+  it("drains a stored op to a member connecting after it was sent (drain-on-connect)", async () => {
+    const alice = await signup("alice");
+    const bob = await signup("bob");
+    const conversationId = await createConversation(alice, [alice.userId, bob.userId]);
+
+    // Bob is offline when Alice sends the op — nothing to fan out to live.
+    const aliceSock = new TestSocket();
+    await aliceSock.authWithFrame(alice.token, 1);
+    const op = Buffer.from("stored-op-for-drain").toString("base64");
+    aliceSock.send({ type: "op-send", conversationId, seq: 0, op });
+    await TestSocket.settle();
+    aliceSock.close();
+
+    // Bob connects afterward: the relay drains the stored op on `ready`,
+    // exactly as it drains a held envelope.
+    const bobSock = new TestSocket();
+    await bobSock.authWithFrame(bob.token, 1);
+    const delivered = await bobSock.waitFor((m) => m.type === "op-deliver");
+    expect(delivered).toEqual({ type: "op-deliver", conversationId, seq: 0, op });
+
+    bobSock.close();
+  });
+
+  it("never imports @signalai/membership into the relay (op body stays opaque, never decoded)", () => {
+    const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
+    expect(deps).not.toHaveProperty("@signalai/membership");
   });
 });

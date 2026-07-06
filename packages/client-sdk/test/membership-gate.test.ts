@@ -1,0 +1,177 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { type OpLogMembershipService } from "@signalai/membership";
+import { SignalAiClient, type IncomingMessage } from "../src/index.js";
+import { type RelayHarness, startRelay, stopRelay, resetDb, uniqueUsername, signupClient, waitUntil, collectMessages } from "./helpers.js";
+
+/**
+ * Phase B falsifiable floor (§B of the phase spec): the receiver-side
+ * `enforceInbound` gate, exercised end to end against the REAL relay +
+ * Postgres + core crypto (same harness as e2e.test.ts / membership-oplog.test.ts).
+ * Phase A already proved the op-log PROPAGATES and PERSISTS; this pass proves
+ * it is actually ENFORCED on the receive path, fail-closed.
+ */
+
+let harness: RelayHarness;
+
+beforeAll(async () => {
+  harness = await startRelay();
+});
+afterAll(async () => {
+  await stopRelay(harness);
+});
+beforeEach(async () => {
+  await resetDb(harness.prisma);
+});
+
+function relayUrl(): string {
+  return harness.relayUrl;
+}
+
+/** Reaches past `SignalAiClient`'s private field to the creator's authoring service (same pattern as membership-oplog.test.ts:33). */
+function authorServiceOf(client: SignalAiClient): OpLogMembershipService {
+  return (client as unknown as { membershipService: OpLogMembershipService }).membershipService;
+}
+
+/** The service's `removeMember(token, ...)` ignores `token` (vestigial in P2P, see service.ts) — reached the same private-field way `authorServiceOf` does, for fidelity rather than because it's load-bearing. */
+function tokenOf(client: SignalAiClient): string {
+  return (client as unknown as { tokenValue: string }).tokenValue;
+}
+
+/**
+ * op-log-only removal (spec Task 3 phasing correction): calling the public
+ * `client.removeMember` dual-writes (REST DELETE + author op), and the
+ * relay's fenced sender-gate then drops the removed member's sends BEFORE
+ * they ever reach a receiver — so receiver-side enforcement is never
+ * exercised. To prove the RECEIVER'S gate does the rejecting, the removed
+ * member must stay relay-active (the relay still forwards its sends); only
+ * the op-log is told they're gone, by authoring the remove op directly
+ * against the private author service and skipping the REST DELETE.
+ */
+async function opLogOnlyRemove(authority: SignalAiClient, conversationId: string, removedUserId: string): Promise<void> {
+  await authorServiceOf(authority).removeMember(tokenOf(authority), conversationId, removedUserId);
+}
+
+describe("membership gate: receiver-side enforceInbound enforcement (Phase B)", () => {
+  it("B-1: end-to-end removal — a removed-but-still-relay-active sender's message is dropped at the remaining member's receive path", async () => {
+    const alice = await signupClient(relayUrl(), uniqueUsername("alice"));
+    const bob = await signupClient(relayUrl(), uniqueUsername("bob"));
+    const carol = await signupClient(relayUrl(), uniqueUsername("carol"));
+
+    await alice.resolveUser(bob.username);
+    await alice.resolveUser(carol.username);
+    await bob.resolveUser(alice.username);
+    await bob.resolveUser(carol.username); // bob sends in this test, so he needs a session with every other member
+    await carol.resolveUser(alice.username);
+    await carol.resolveUser(bob.username);
+
+    const convId = await alice.createConversation([bob.userId, carol.userId]);
+    await bob.listMembers(convId); // drain genesis so bob's later stamp has a head
+    await carol.listMembers(convId); // drain genesis so carol's gate has a chain to authorize against
+
+    const carolMessages = collectMessages(carol);
+
+    // op-log-only-remove bob: relay still sees him as active (forwards his sends);
+    // only the receiver's folded op-log knows he's gone -> the gate does the rejecting.
+    await opLogOnlyRemove(alice, convId, bob.userId);
+    await waitUntil(() => (carol.membershipLogFor(convId)?.head().seq ?? -1) >= 1, 10_000);
+
+    await bob.send(convId, "after removal");
+
+    // Bounded settle window: prove carol's onMessage is NEVER invoked for this send.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(carolMessages.find((m) => m.text === "after removal")).toBeUndefined();
+    expect(carolMessages.length).toBe(0);
+
+    alice.disconnect();
+    bob.disconnect();
+    carol.disconnect();
+  }, 30_000);
+
+  it("B-2: C3 replay — a removed sender citing his stale pre-removal head is still rejected, authorized at the receiver's OWN head", async () => {
+    const alice = await signupClient(relayUrl(), uniqueUsername("alice"));
+    const bob = await signupClient(relayUrl(), uniqueUsername("bob"));
+    const carol = await signupClient(relayUrl(), uniqueUsername("carol"));
+
+    await alice.resolveUser(bob.username);
+    await alice.resolveUser(carol.username);
+    await bob.resolveUser(alice.username);
+    await bob.resolveUser(carol.username); // bob sends in this test, so he needs a session with every other member
+    await carol.resolveUser(alice.username);
+    await carol.resolveUser(bob.username);
+
+    const convId = await alice.createConversation([bob.userId, carol.userId]);
+    await bob.listMembers(convId);
+    await carol.listMembers(convId);
+
+    const carolMessages = collectMessages(carol);
+
+    await opLogOnlyRemove(alice, convId, bob.userId);
+    await waitUntil(() => (carol.membershipLogFor(convId)?.head().seq ?? -1) >= 1, 10_000);
+
+    // Freeze bob's op-log at genesis (seq 0) so `sendRaw` stamps his STALE
+    // pre-removal head, not his (unreceived, since the relay never forwards
+    // an author's own op) up-to-date one.
+    const bobConv = bob.stores.conversations.get(convId)!;
+    bobConv.membershipOps.length = 1;
+
+    await bob.send(convId, "replay with stale head");
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(carolMessages.find((m) => m.text === "replay with stale head")).toBeUndefined();
+    expect(carolMessages.length).toBe(0);
+
+    alice.disconnect();
+    bob.disconnect();
+    carol.disconnect();
+  }, 30_000);
+
+  it("B-3: absent-head fail-closed — a message with no membershipHead is dropped even from a current member", async () => {
+    const alice = await signupClient(relayUrl(), uniqueUsername("alice"));
+    const carol = await signupClient(relayUrl(), uniqueUsername("carol"));
+
+    await alice.resolveUser(carol.username);
+    await carol.resolveUser(alice.username);
+
+    const convId = await alice.createConversation([carol.userId]);
+    await alice.listMembers(convId);
+    await carol.listMembers(convId);
+
+    const carolMessages = collectMessages(carol);
+
+    // Force alice's stamp to be ABSENT: clear her local op cache for the conv
+    // so `membershipLogFor` -> undefined -> `sendRaw` omits `membershipHead`.
+    alice.stores.conversations.get(convId)!.membershipOps = [];
+
+    await alice.send(convId, "no head");
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(carolMessages.find((m) => m.text === "no head")).toBeUndefined();
+    expect(carolMessages.length).toBe(0);
+
+    alice.disconnect();
+    carol.disconnect();
+  }, 30_000);
+
+  it("B-4: no-regression — healthy in-group traffic from a current, stamped member still delivers", async () => {
+    const alice = await signupClient(relayUrl(), uniqueUsername("alice"));
+    const carol = await signupClient(relayUrl(), uniqueUsername("carol"));
+
+    await alice.resolveUser(carol.username);
+    await carol.resolveUser(alice.username);
+
+    const convId = await alice.createConversation([carol.userId]);
+    await alice.listMembers(convId);
+    await carol.listMembers(convId);
+
+    const carolMessages: IncomingMessage[] = collectMessages(carol);
+
+    await alice.send(convId, "hello");
+
+    await waitUntil(() => carolMessages.some((m) => m.text === "hello"), 10_000);
+    const received = carolMessages.find((m) => m.text === "hello")!;
+    expect(received.senderUserId).toBe(alice.userId);
+
+    alice.disconnect();
+    carol.disconnect();
+  }, 30_000);
+});

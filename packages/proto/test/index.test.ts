@@ -20,6 +20,8 @@ import {
   SetAiModeResponseSchema,
   ListMembersRequestSchema,
   ListMembersResponseSchema,
+  WsOpSendFrameSchema,
+  WsOpDeliverFrameSchema,
 } from "../src/index.js";
 
 const validBundle = {
@@ -117,6 +119,22 @@ describe("WsFrameSchema / parseWsFrame", () => {
   it("rejects a frame with an unknown discriminant", () => {
     expect(() => parseWsFrame({ type: "not-a-real-frame" })).toThrow();
   });
+
+  it("parses op-send / op-deliver frames (opaque base64 `op`, cleartext seq)", () => {
+    const op = "b3BhcXVlLW9wLWJ5dGVz"; // arbitrary base64 — proto never decodes it
+    const opSend = parseWsFrame({ type: "op-send", conversationId: "conv-1", seq: 0, op });
+    expect(opSend.type).toBe("op-send");
+    const opDeliver = parseWsFrame({ type: "op-deliver", conversationId: "conv-1", seq: 0, op });
+    expect(opDeliver.type).toBe("op-deliver");
+  });
+
+  it("rejects op-send/op-deliver frames missing required fields", () => {
+    expect(() => WsOpSendFrameSchema.parse({ type: "op-send", conversationId: "conv-1", seq: 0 })).toThrow();
+    expect(() => WsOpSendFrameSchema.parse({ type: "op-send", conversationId: "", seq: 0, op: "AQ==" })).toThrow();
+    expect(() =>
+      WsOpDeliverFrameSchema.parse({ type: "op-deliver", conversationId: "conv-1", seq: -1, op: "AQ==" }),
+    ).toThrow();
+  });
 });
 
 describe("PreKeyBundlePublicSchema", () => {
@@ -208,6 +226,8 @@ describe("full schema set export surface", () => {
       "WsDeliverFrameSchema",
       "WsAckFrameSchema",
       "WsSubscribeFrameSchema",
+      "WsOpSendFrameSchema",
+      "WsOpDeliverFrameSchema",
       "WsFrameSchema",
       "PreKeyBundlePublicSchema",
       "SignupRequestSchema",

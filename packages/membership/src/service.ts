@@ -66,11 +66,18 @@ export class OpLogMembershipService implements MembershipServiceSeam {
     return { ...unsigned, sig: signOp(unsigned, this.identity.keyPair.privateKey) };
   }
 
+  /**
+   * `conversationId` is optional/additive (Phase A.2, client-sdk dual-write):
+   * lets a caller that already minted the conversationId elsewhere (the relay
+   * REST call in `@signalai/client-sdk`) have the genesis op adopt that same
+   * id, instead of the service minting its own. Defaults to `randomUUID()` so
+   * every pre-existing caller (tests, non-dual-write callers) is unaffected.
+   */
   async createConversation(
     _token: string,
     req: { creatorUserId: string; memberUserIds: string[]; aiMode: boolean },
+    conversationId: string = randomUUID(),
   ): Promise<string> {
-    const conversationId = randomUUID();
     const op = this.sign({
       type: "create",
       conversationId,

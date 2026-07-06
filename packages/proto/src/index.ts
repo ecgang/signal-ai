@@ -147,6 +147,30 @@ export const WsSendFrameSchema = z.object({
 });
 export type WsSendFrame = z.infer<typeof WsSendFrameSchema>;
 
+/**
+ * Client -> relay: submit one signed membership op for propagation. `op` is the
+ * base64 canonical encoding of a signed MembershipOp (opaque to the relay — it
+ * NEVER decodes it). `seq` is the op's own chain position, carried in cleartext
+ * (like Envelope.seq) purely so the relay can order/dedupe/route without reading
+ * the op body. Membership authority lives in the signed chain, not the relay.
+ */
+export const WsOpSendFrameSchema = z.object({
+  type: z.literal("op-send"),
+  conversationId: z.string().min(1),
+  seq: z.number().int().nonnegative(),
+  op: z.string().min(1),
+});
+export type WsOpSendFrame = z.infer<typeof WsOpSendFrameSchema>;
+
+/** Relay -> client: deliver one stored membership op (opaque base64, see WsOpSendFrame). */
+export const WsOpDeliverFrameSchema = z.object({
+  type: z.literal("op-deliver"),
+  conversationId: z.string().min(1),
+  seq: z.number().int().nonnegative(),
+  op: z.string().min(1),
+});
+export type WsOpDeliverFrame = z.infer<typeof WsOpDeliverFrameSchema>;
+
 /** The discriminated union of every WS frame kind, keyed on `type`. */
 export const WsFrameSchema = z.discriminatedUnion("type", [
   WsDeliverFrameSchema,
@@ -154,6 +178,8 @@ export const WsFrameSchema = z.discriminatedUnion("type", [
   WsAckFrameSchema,
   WsSubscribeFrameSchema,
   WsSendFrameSchema,
+  WsOpSendFrameSchema,
+  WsOpDeliverFrameSchema,
 ]);
 export type WsFrame = z.infer<typeof WsFrameSchema>;
 

@@ -32,6 +32,33 @@ availability and membership coordination, but never for confidentiality**:
   authenticated with a per-account bearer token. A token grants a member's own
   traffic only — it is not a member of any thread and cannot read others' traffic.
 
+### Membership op-log & late-join
+
+A signed, hash-chained membership op-log (`@signalai/membership`) runs alongside
+the relay's member list. Clients stamp their current op-log head into each
+(ratchet-encrypted) message and a **fail-closed receiver gate** (`enforceInbound`)
+authorizes every inbound message against the RECEIVER'S own current head — a
+removed sender is rejected no matter which head it cites, and a message with no
+head is rejected. This adds client-side membership enforcement on top of the
+relay's coordination; it does not replace it, and two honest scope limits apply:
+
+- **Late-join genesis is relay-served and TRUSTED (not yet pinned).** A member
+  invited mid-conversation backfills the op-log genesis→tail by asking the relay
+  to re-drain it (client-driven `subscribe`). The relay orders/dedupes ops by
+  cleartext `seq` and never decodes op bodies, but it *is* the source of the
+  genesis chain the joiner folds. A malicious relay could serve a forged genesis
+  chain until the out-of-band **InvitePin** TOFU (genesisHash + pinnedHead) is
+  wired in to pin it. Pinning is the tracked follow-up (`FOLLOW-UP(InvitePin)`).
+  The backfill fires from two sites: an explicit `listMembers` refresh, and — for a
+  consumer that adopts a conversation inside its `onMessage` handler and never calls
+  `listMembers` first — the receive path itself, one-shot on the first inbound
+  message (adopt-on-first-message), before the gate decides.
+- **A message in the pre-catch-up window is best-effort dropped.** A message that
+  arrives at a joiner after her REST-invite but before her catch-up completes is
+  gate-rejected and dropped (acked so the relay stops redelivering), not queued
+  for replay. Join is made synchronous (the invite path awaits chain-readiness,
+  bounded) to keep this window narrow, but delivery inside it is not guaranteed.
+
 ## The AI member and inference — where plaintext goes
 
 The AI is a **member/endpoint**, not the transport: it holds its own libsignal

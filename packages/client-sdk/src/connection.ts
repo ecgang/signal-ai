@@ -1,10 +1,13 @@
 import {
   WsDeliverFrameSchema,
   WsReadyFrameSchema,
+  WsOpDeliverFrameSchema,
   type Envelope,
   type WsSendFrame,
   type WsAckFrame,
   type WsSubscribeFrame,
+  type WsOpSendFrame,
+  type WsOpDeliverFrame,
 } from "@signalai/proto";
 import type { ClientSocket, MessageTransport } from "./transport.js";
 import type { ConnectionState } from "./types.js";
@@ -16,12 +19,21 @@ interface WsAuthFrame {
   deviceId: number;
 }
 
-type OutgoingFrame = WsAuthFrame | WsSendFrame | WsAckFrame | WsSubscribeFrame;
+type OutgoingFrame = WsAuthFrame | WsSendFrame | WsAckFrame | WsSubscribeFrame | WsOpSendFrame;
 
 export interface DuplexLinkHandlers {
   onReady: () => void;
   onDeliver: (envelope: Envelope) => void;
   onStateChange: (state: ConnectionState) => void;
+  /**
+   * Fires on an incoming `op-deliver` frame (Phase A.2) — one membership
+   * op propagated by the relay for `conversationId` at chain position `seq`,
+   * opaque base64 in `op` (see `WsOpDeliverFrameSchema`). Optional: only
+   * `SignalAiClient` wires it (to accumulate + persist the receiver chain);
+   * a bare `DuplexLink` consumer that doesn't care about membership ops can
+   * omit it.
+   */
+  onOp?: (frame: WsOpDeliverFrame) => void;
 }
 
 /**
@@ -123,6 +135,12 @@ export class DuplexLink {
       const deliverFrame = WsDeliverFrameSchema.safeParse(parsed);
       if (deliverFrame.success) {
         this.handlers.onDeliver(deliverFrame.data.envelope);
+        return;
+      }
+
+      const opDeliverFrame = WsOpDeliverFrameSchema.safeParse(parsed);
+      if (opDeliverFrame.success) {
+        this.handlers.onOp?.(opDeliverFrame.data);
       }
     });
 
@@ -170,7 +188,7 @@ export class DuplexLink {
     socket.send(JSON.stringify(frame));
   }
 
-  send(frame: WsSendFrame | WsAckFrame): void {
+  send(frame: WsSendFrame | WsAckFrame | WsOpSendFrame): void {
     if (!this.socket || !this.ready) throw new Error("DuplexLink.send: socket is not connected/ready");
     this.rawSend(this.socket, frame);
   }
