@@ -28,6 +28,17 @@ export interface CachedConversation {
   members: Map<string, CachedMember>;
   aiMode: boolean;
   adminUserId?: string;
+  /**
+   * This conversation's membership op-log chain, as an ordered (by seq),
+   * dense (index === seq) array of base64-encoded signed ops (`encodeOp(op)`
+   * -> base64) — see `@signalai/membership`. Stored as base64 strings (not
+   * decoded `MembershipOp` objects) so it's JSON-serializable as-is and
+   * round-trips through {@link InMemoryClientStores.toJSON}/`fromJSON`
+   * unchanged (Phase A.2 cold-load). Empty until at least one op has been
+   * authored or received for this conversation. NOT yet consumed by any
+   * enforcement gate (Phase B) — this pass only propagates + persists it.
+   */
+  membershipOps: string[];
 }
 
 /** A resolved contact: the durable relay `userId` behind a human-readable `username`. */
@@ -41,6 +52,7 @@ export interface SerializedCachedConversation {
   members: Array<[string, CachedMember]>;
   aiMode: boolean;
   adminUserId?: string;
+  membershipOps: string[];
 }
 
 /**
@@ -126,6 +138,7 @@ export class InMemoryClientStores implements ClientStores {
         const serialized: SerializedCachedConversation = {
           members: [...conv.members.entries()],
           aiMode: conv.aiMode,
+          membershipOps: [...conv.membershipOps],
         };
         if (conv.adminUserId !== undefined) serialized.adminUserId = conv.adminUserId;
         return [id, serialized];
@@ -145,10 +158,28 @@ export class InMemoryClientStores implements ClientStores {
     for (const id of data.seenMsgIds) stores.seenMsgIds.add(id);
     for (const [userId, entry] of data.directory) stores.directory.set(userId, entry);
     for (const [convId, conv] of data.conversations) {
-      const rebuilt: CachedConversation = { members: new Map(conv.members), aiMode: conv.aiMode };
+      const rebuilt: CachedConversation = {
+        members: new Map(conv.members),
+        aiMode: conv.aiMode,
+        membershipOps: [...(conv.membershipOps ?? [])],
+      };
       if (conv.adminUserId !== undefined) rebuilt.adminUserId = conv.adminUserId;
       stores.conversations.set(convId, rebuilt);
     }
     return stores;
   }
+}
+
+/**
+ * Idempotent, dense append onto a {@link CachedConversation}'s persisted
+ * `membershipOps` chain (Phase A.2): `seq` must equal the array's current
+ * length to append. `seq < length` is a dup (already have it — ignore);
+ * `seq > length` is a gap (an earlier op hasn't arrived yet) — ignored rather
+ * than filled, since a reconnect re-drain recovers gaps from the relay.
+ * Returns whether the op was appended.
+ */
+export function appendMembershipOp(conv: CachedConversation, seq: number, encodedOp: string): boolean {
+  if (seq !== conv.membershipOps.length) return false;
+  conv.membershipOps.push(encodedOp);
+  return true;
 }

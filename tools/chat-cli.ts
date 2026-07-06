@@ -10,10 +10,10 @@
  *   pnpm --filter @signalai/tools chat <relayUrl> <inviteCode> <username> [conversationId]
  *     # equivalently, from tools/:  tsx chat-cli.ts <relayUrl> <inviteCode> <username>
  *
- * Two terminals against the same relay. First bring up the db + relay:
+ * Two terminals against the same relay/node. First bring up the db + node:
  *
  *   docker compose up -d db
- *   INVITE_CODES=LETMEIN pnpm --filter @signalai/relay dev   # listens on http://localhost:8080
+ *   INVITE_CODES=LETMEIN pnpm --filter @signalai/node dev   # listens on http://localhost:8080
  *
  * Then, in two more terminals:
  *

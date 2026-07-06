@@ -8,13 +8,23 @@ import {
   bundleToWire,
   bundleFromWire,
   fromBase64,
+  toBase64,
   type DeviceAddress,
   type ProvisionedPreKeys,
 } from "@signalai/core";
-import { parsePlaintextMessage, type PlaintextMessage, type Envelope, type PreKeyBundlePublic } from "@signalai/proto";
+import { parsePlaintextMessage, type PlaintextMessage, type Envelope, type PreKeyBundlePublic, type WsOpDeliverFrame } from "@signalai/proto";
+import {
+  OpLogMembershipService,
+  MembershipLog,
+  decodeOp,
+  encodeOp,
+  enforceInbound,
+  type OpBroadcaster,
+  type MembershipOp,
+} from "@signalai/membership";
 import { createHttpWsTransport, type Transport } from "./transport.js";
-import { WsLink } from "./connection.js";
-import { InMemoryClientStores, type ClientStores, type SerializedClientStores } from "./stores.js";
+import { DuplexLink } from "./connection.js";
+import { InMemoryClientStores, appendMembershipOp, type ClientStores, type SerializedClientStores } from "./stores.js";
 import type { ConnectionState, Member, SignalAiClientHandlers } from "./types.js";
 
 const DEFAULT_INITIAL_OTP_COUNT = 5;
@@ -88,10 +98,30 @@ export class SignalAiClient {
   private tokenValue: string;
   private nextOneTimePreKeyId: number;
   private readonly autoResolveMembersById: boolean;
-  private link: WsLink | undefined;
+  private link: DuplexLink | undefined;
   private connectionStateValue: ConnectionState = "disconnected";
   private inbox: Promise<void> = Promise.resolve();
   private identityChangeLogCursor = 0;
+  /**
+   * Conversations for which this session has already fired a one-shot
+   * late-join op-log catch-up `subscribe` (see {@link listMembers}). Bounds
+   * the backfill to ONE relay resync per conversation per session so the
+   * hot-path callers of `listMembers` can never storm the relay.
+   */
+  private readonly opCatchupAttempted = new Set<string>();
+  /**
+   * This client's op-log AUTHOR-side seam (design gotcha #1, Phase A.2): only
+   * the conversation creator ever successfully authors through it (its
+   * internal `chains` map only knows conversations THIS instance created via
+   * {@link createConversation}) — a non-creator's authoring calls fail closed
+   * and are swallowed by {@link authorMembershipOp}, leaving the relay REST
+   * call as the sole effect for that pass. Every client (author or not) still
+   * owns a RECEIVER-side chain via `stores.conversations.get(id).membershipOps`
+   * (see {@link handleIncomingOp} / {@link membershipLogFor}) — constructed
+   * once {@link connect} has a `link` to broadcast over, and never rebuilt on
+   * reconnect (its internal chain state must survive reconnects).
+   */
+  private membershipService: OpLogMembershipService | undefined;
   readonly username: string;
 
   private constructor(init: SignalAiClientInit) {
@@ -347,15 +377,30 @@ export class SignalAiClient {
    */
   async connect(): Promise<void> {
     this.link?.disconnect();
-    this.link = new WsLink(this.transport, this.tokenValue, this.deviceId, {
+    this.link = new DuplexLink(this.transport, this.tokenValue, this.deviceId, {
       onReady: () => {},
       onDeliver: (envelope) => this.enqueueIncoming(envelope),
+      onOp: (frame) => this.handleIncomingOp(frame),
       onStateChange: (state) => {
         this.connectionStateValue = state;
         this.onConnectionChange?.(state);
       },
     });
     await this.link.connect();
+    // Constructed once, lazily, the first time a link exists — NOT rebuilt on
+    // reconnect, since it holds the author-side chain state in memory
+    // (design gotcha #1/#2). The broadcaster reads `this.link` at call time
+    // (not captured at construction), so it always sends over the CURRENT
+    // link even after a later reconnect replaces `this.link`.
+    if (!this.membershipService) {
+      const broadcaster: OpBroadcaster = {
+        broadcastOp: (conversationId, encodedOp) => {
+          const { seq } = decodeOp(encodedOp);
+          this.link!.send({ type: "op-send", conversationId, seq, op: toBase64(encodedOp) });
+        },
+      };
+      this.membershipService = new OpLogMembershipService(this.identity, this.userId, broadcaster);
+    }
   }
 
   /** Intentionally disconnects; no auto-reconnect happens until `connect()` is called again. */
@@ -365,6 +410,93 @@ export class SignalAiClient {
 
   private enqueueIncoming(envelope: Envelope): void {
     this.inbox = this.inbox.then(() => this.handleIncomingEnvelope(envelope)).catch(() => undefined);
+  }
+
+  /**
+   * Rebuilds this conversation's RECEIVER-side {@link MembershipLog} from the
+   * persisted base64 chain (`stores.conversations.get(id).membershipOps`) —
+   * the source of truth, so a cold-load (`toJSON`/`fromJSON` round-trip)
+   * reproduces the same log (Phase A.2 / A-3). Returns `undefined` if no ops
+   * have been accumulated yet. Consumed by both the Phase B stamp (`sendRaw`)
+   * and the Phase B receiver gate (`handleIncomingEnvelope` -> `enforceInbound`).
+   */
+  membershipLogFor(conversationId: string): MembershipLog | undefined {
+    const cached = this.stores.conversations.get(conversationId);
+    if (!cached || cached.membershipOps.length === 0) return undefined;
+    const chain: MembershipOp[] = cached.membershipOps.map((encoded) => decodeOp(fromBase64(encoded)));
+    return MembershipLog.open(chain);
+  }
+
+  /**
+   * Receive path for an incoming `op-deliver` frame (Phase A.2, design gotcha
+   * #2): decodes+validates the single op, appends it to the persisted
+   * per-conversation chain (idempotent/dense — {@link appendMembershipOp}),
+   * then rebuilds the full receiver {@link MembershipLog} to independently
+   * verify the chain still holds together end to end. A bad/forged op (or one
+   * that breaks the hash chain) is dropped and the append rolled back rather
+   * than left in a state that would never verify. Ops are membership
+   * metadata, not chat — never dispatched to `onMessage`, and bypass the
+   * envelope `inbox` mutex (independently verified + idempotent), but still
+   * processed one at a time per DuplexLink's single onMessage callback so
+   * ordering per conversation holds.
+   */
+  private handleIncomingOp(frame: WsOpDeliverFrame): void {
+    try {
+      decodeOp(fromBase64(frame.op));
+    } catch {
+      return; // not a real op — drop.
+    }
+
+    let cached = this.stores.conversations.get(frame.conversationId);
+    if (!cached) {
+      cached = { members: new Map(), aiMode: false, membershipOps: [] };
+      this.stores.conversations.set(frame.conversationId, cached);
+    }
+    if (!appendMembershipOp(cached, frame.seq, frame.op)) return; // dup or gap — reconnect re-drain recovers gaps.
+
+    try {
+      this.membershipLogFor(frame.conversationId); // throws if the assembled chain no longer verifies.
+    } catch {
+      cached.membershipOps.pop(); // bad/forged op — roll back so persisted state stays valid.
+      console.debug(`membership: rejected an op for conversation ${frame.conversationId} at seq ${frame.seq}`);
+    }
+  }
+
+  /**
+   * Authors a membership op via {@link membershipService} and, on success,
+   * syncs this client's own receiver-side chain from the service's
+   * authoritative view. Swallows failures silently: only the conversation
+   * CREATOR's service instance knows the conversation (design gotcha #1) — a
+   * non-creator calling this throws `IntegrityError` internally, which is
+   * expected and not special-cased (spec step 5) — the relay REST call the
+   * caller already made remains the effective, unchanged behavior for that
+   * case in this pass.
+   */
+  private async authorMembershipOp(conversationId: string, author: () => Promise<void>): Promise<void> {
+    if (!this.membershipService) return;
+    try {
+      await author();
+      this.syncOwnMembershipChain(conversationId);
+    } catch {
+      // Not this client's op-log to author (non-creator), or the service
+      // never observed this conversation's genesis — best-effort in Phase A.
+    }
+  }
+
+  /** Syncs this client's own persisted receiver chain from {@link membershipService}'s authoritative chain for `conversationId` (author-side self-sync, design gotcha #2: the relay fan-out excludes the sender, so an author never receives its own op back over the wire). */
+  private syncOwnMembershipChain(conversationId: string): void {
+    if (!this.membershipService) return;
+    let chain: MembershipOp[];
+    try {
+      chain = this.membershipService.chainFor(conversationId);
+    } catch {
+      return;
+    }
+    const cached = this.stores.conversations.get(conversationId);
+    if (!cached) return;
+    for (let seq = cached.membershipOps.length; seq < chain.length; seq++) {
+      appendMembershipOp(cached, seq, toBase64(encodeOp(chain[seq]!)));
+    }
   }
 
   /**
@@ -465,6 +597,17 @@ export class SignalAiClient {
       members: new Map([[this.userId, { deviceIds: [this.deviceId], joinedAt: Date.now() }]]),
       aiMode,
       adminUserId: this.userId,
+      membershipOps: [],
+    });
+    // Dual-write (Phase A.2): the relay call above remains the source of
+    // truth for this pass; the op-log genesis adopts the SAME conversationId
+    // (step 5b's additive param) so a receiver's chain binds to it too.
+    await this.authorMembershipOp(conversationId, async () => {
+      await this.membershipService!.createConversation(
+        this.tokenValue,
+        { creatorUserId: this.userId, memberUserIds, aiMode },
+        conversationId,
+      );
     });
     await this.listMembers(conversationId).catch(() => undefined);
     return conversationId;
@@ -472,11 +615,28 @@ export class SignalAiClient {
 
   async invite(conversationId: string, userId: string): Promise<void> {
     await this.transport.invite(this.tokenValue, conversationId, userId);
+    await this.authorMembershipOp(conversationId, () => this.membershipService!.invite(this.tokenValue, conversationId, userId));
     await this.listMembers(conversationId).catch(() => undefined);
   }
 
+  /**
+   * Dual-write (Phase A.2), same order as {@link invite}: relay REST first
+   * (still the enforcement source of truth this pass — e2e removal tests
+   * depend on it), then author + broadcast the matching op-log op. NOTE: the
+   * relay's op-send fan-out gates each recipient by `isActiveMember`, so once
+   * the REST call has revoked `userId` the relay correctly refuses to fan the
+   * removal op out to the removed member — the removed member does NOT
+   * converge on their own removal, by design. That is fine: removal is
+   * enforced by RECEIVER-side rejection (Phase B), not by the removed member
+   * self-converging. REMAINING members stay active and receive the op with no
+   * ordering dependency (see the A-1 test, which asserts a remaining member's
+   * convergence for exactly this reason).
+   */
   async removeMember(conversationId: string, userId: string): Promise<void> {
     await this.transport.removeMember(this.tokenValue, conversationId, userId);
+    await this.authorMembershipOp(conversationId, () =>
+      this.membershipService!.removeMember(this.tokenValue, conversationId, userId),
+    );
     await this.listMembers(conversationId).catch(() => undefined);
   }
 
@@ -507,7 +667,7 @@ export class SignalAiClient {
     const raw = resp.members;
     let cached = this.stores.conversations.get(conversationId);
     if (!cached) {
-      cached = { members: new Map(), aiMode: resp.aiMode };
+      cached = { members: new Map(), aiMode: resp.aiMode, membershipOps: [] };
       this.stores.conversations.set(conversationId, cached);
     }
     // Sync mode from the relay on EVERY refresh so a peer's `setAiMode` toggle
@@ -539,8 +699,52 @@ export class SignalAiClient {
       }
     }
 
+    // Late-join genesis backfill: if we are (now) a member of this conversation
+    // but hold NO local op-chain for it, we joined mid-conversation and missed
+    // the genesis->tail op drain that only fires on WS connect / an explicit
+    // subscribe (a lone live invite op arrives against our empty chain, hits
+    // `appendMembershipOp`'s dense-seq guard as a forward gap, and is dropped).
+    // Trigger the relay's manual resync ONCE and wait, bounded, for the chain
+    // to populate — so the fail-closed membership gate has a chain to authorize
+    // senders against before any post-join message is gate-checked. Existing
+    // members (chain already present) never enter this branch, so healthy
+    // traffic pays nothing.
+    //
+    // TRUST CAVEATS (honest scope — see SECURITY.md "Membership op-log & late-join"):
+    //   1. The genesis chain served here is whatever the RELAY drains us. A
+    //      malicious relay could serve a forged genesis until the out-of-band
+    //      InvitePin TOFU (genesisHash + pinnedHead, `packages/membership`
+    //      `InvitePin`) is wired in to pin it. Relay-served genesis is TRUSTED
+    //      for now; pinning is the tracked follow-up.
+    //   2. A message sent to us in the narrow window between our REST-invite and
+    //      this catch-up completing is gate-rejected + dropped (best-effort
+    //      late-join delivery), NOT queued for replay.
+    // FOLLOW-UP(InvitePin): pin the relay-served genesis against the out-of-band InvitePin.
+    if (
+      this.link?.isReady &&
+      this.membershipLogFor(conversationId) === undefined &&
+      !this.opCatchupAttempted.has(conversationId)
+    ) {
+      this.opCatchupAttempted.add(conversationId);
+      this.link.subscribe(conversationId); // relay drainAndPush: ops from seq 0 (+ envelopes; dedup handles replays).
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline && this.membershipLogFor(conversationId) === undefined) {
+        await new Promise((r) => setTimeout(r, 50)); // yields to the WS handler that applies inbound op frames.
+      }
+    }
+
+    // Phase C — op-log is the membership AUTHORITY. The relay round-trip above is the device/aiMode
+    // DIRECTORY (fan-out needs deviceIds the fold doesn't carry; aiMode is relay-single-writer), but the
+    // authoritative *member set* is the local op-log fold. Gate the roster: a userId the relay still lists
+    // but the fold does NOT contain has been removed via the op-log (possibly with the relay write lagging
+    // or suppressed) and MUST NOT appear in the roster — which also drops it from fan-out (sendRaw builds
+    // targets from this return value). Fall back to the raw relay roster only when we hold no fold for this
+    // conversation (legacy / no-op-log / pre-catch-up), matching the receive gate's own "no chain" posture.
+    const authoritative = this.membershipLogFor(conversationId)?.members(); // Set<string> | undefined
+
     const members: Member[] = [];
     for (const m of raw) {
+      if (authoritative && !authoritative.has(m.userId)) continue; // op-log authority: exclude fold-removed members
       const cachedEntry = cached.members.get(m.userId)!;
       for (const deviceId of m.deviceIds) {
         const known = await this.stores.identity.getIdentity(toProtocolAddress({ userId: m.userId, deviceId }));
@@ -568,6 +772,19 @@ export class SignalAiClient {
   async sendRaw(conversationId: string, plaintext: PlaintextMessage): Promise<void> {
     parsePlaintextMessage(plaintext);
 
+    // Phase B: stamp this sender's CURRENT receiver-side membership head
+    // (@signalai/membership `MembershipLog.head()`, byte-identical to
+    // `MembershipHeadSchema`) into the plaintext, if one exists yet. This is
+    // the RECEIVER log every member holds (`membershipLogFor`), NOT
+    // `membershipService.headFor` — the author-only service throws for any
+    // non-authority sender (FACT 1). Stamping the current head on every
+    // (re)send is intentional: the head may have advanced between sends. No
+    // head yet (`membershipLogFor` -> undefined) -> leave `membershipHead`
+    // absent; a receiver fail-closed-rejects an absent head (Task 2), which
+    // is the correct posture rather than fabricating one.
+    const head = this.membershipLogFor(conversationId)?.head();
+    if (head) plaintext.membershipHead = { seq: head.seq, headHash: head.headHash };
+
     const members = await this.listMembers(conversationId);
     const targets: DeviceAddress[] = members
       .filter((m) => m.userId !== this.userId)
@@ -590,13 +807,15 @@ export class SignalAiClient {
   }
 
   /**
-   * Decrypts, dedupes, and dispatches a single incoming Envelope — the same
-   * path the WS `deliver` handler drives. Public so callers/tests can feed it
-   * a hand-constructed Envelope directly (e.g. to prove sender-authenticity:
-   * `decryptEnvelope` picks the session from `envelope.senderUserId`, so a
-   * forged sender field decrypts against the wrong/no session and throws —
-   * this method catches that and drops the message silently, never invoking
-   * `onMessage` for an unverified sender).
+   * Decrypts, gates, dedupes, and dispatches a single incoming Envelope — the
+   * same path the WS `deliver` handler drives. Public so callers/tests can
+   * feed it a hand-constructed Envelope directly (e.g. to prove
+   * sender-authenticity: `decryptEnvelope` picks the session from
+   * `envelope.senderUserId`, so a forged sender field decrypts against the
+   * wrong/no session and throws — this method catches that and drops the
+   * message silently, never invoking `onMessage` for an unverified sender).
+   * Phase B additionally runs the membership `enforceInbound` gate after
+   * decrypt+parse, fail-closed — see the inline comment below.
    */
   async handleIncomingEnvelope(envelope: Envelope): Promise<void> {
     let plaintextBytes: Uint8Array;
@@ -612,6 +831,59 @@ export class SignalAiClient {
       message = parsePlaintextMessage(JSON.parse(new TextDecoder().decode(plaintextBytes)) as unknown);
     } catch {
       this.safeAck(envelope.conversationId, envelope.seq);
+      return;
+    }
+
+    // Phase B receiver-side gate (design §6), fail-closed. Runs AFTER decrypt
+    // (:756 above) and AFTER parse (immediately above), using
+    // `envelope.senderUserId` — safe to trust here ONLY because it already
+    // survived `decryptEnvelope`'s session lookup (FACT 2, see the comment at
+    // the top of this method). Authorizes at THIS receiver's own current
+    // head, never the sender-cited head (closes C3 replay). `accepted: false`
+    // -> DROP: never dispatch to `onMessage`, never add to `seenMsgIds`; ACK
+    // so the relay stops redelivering a message that's rejected for good
+    // (e.g. from a genuinely-removed-but-still-relay-active sender), then
+    // return. No network catch-up transport exists yet in Phase B, so a
+    // receiver that is behind the cited head has no way to fetch the fuller
+    // chain and will reject-and-ack rather than accept post-catch-up — a
+    // known Phase B liveness limitation (see report).
+    let log = this.membershipLogFor(envelope.conversationId);
+    // Late-join self-heal (adopt-on-first-message, site B — complements the
+    // listMembers backfill at site A): if we hold NO chain for this conversation
+    // yet, the relay still delivered this envelope to us — which means it
+    // considers us an active member — so we joined mid-conversation and missed
+    // the genesis->tail drain. Give ourselves ONE guarded chance to backfill via
+    // the relay's manual resync BEFORE the fail-closed gate decides, so the FIRST
+    // inbound message can populate the chain and trigger adoption instead of
+    // being dropped. Site A (`listMembers`) is structurally unreachable for a
+    // consumer that adopts a conversation inside its `onMessage` handler and thus
+    // never calls `listMembers` before this first message.
+    // DoS-safe: `opCatchupAttempted` (SHARED with the listMembers backfill — not a
+    // second set) bounds this to a single subscribe + bounded await per
+    // conversation per session. Deadlock-free: op-deliver frames apply via
+    // `handleIncomingOp` OFF the `inbox` mutex, so they land while this awaits.
+    // Does NOT weaken the gate: `enforceInbound` below still runs on the fetched
+    // chain, so a removed/foreign/absent-head sender is still rejected — only the
+    // "no chain at all" case gets a fetch-then-decide instead of an auto-reject.
+    if (log === undefined && this.link?.isReady && !this.opCatchupAttempted.has(envelope.conversationId)) {
+      this.opCatchupAttempted.add(envelope.conversationId);
+      this.link.subscribe(envelope.conversationId); // relay drainAndPush: ops from seq 0 (+ envelopes; dedup handles replays).
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline && this.membershipLogFor(envelope.conversationId) === undefined) {
+        await new Promise((r) => setTimeout(r, 50)); // yields to the WS handler that applies inbound op frames.
+      }
+      log = this.membershipLogFor(envelope.conversationId);
+    }
+    const verdict = log
+      ? enforceInbound(log, envelope.senderUserId, message.membershipHead, () =>
+          this.membershipLogFor(envelope.conversationId)?.chain(),
+        )
+      : { accepted: false, reason: "receiver holds no membership chain for this conversation" };
+    if (!verdict.accepted) {
+      console.debug(
+        `membership gate: dropped msg in ${envelope.conversationId} from ${envelope.senderUserId}: ${verdict.reason}`,
+      );
+      this.safeAck(envelope.conversationId, envelope.seq); // ack so the relay stops redelivering; DROP (never dispatch).
       return;
     }
 

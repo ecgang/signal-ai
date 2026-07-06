@@ -1,9 +1,15 @@
 # syntax=docker/dockerfile:1
 #
-# @signalai/relay — Fastify E2EE store-and-forward backbone.
+# @signalai/node — Fastify process shell over a ciphertext-only MailboxService
+# (store-and-forward) plus the demoted relay's membership/prekey-directory
+# routes. Those routes are FENCED (see src/index.ts, src/db.ts —
+# `// AUTHORITY — removed in P2 (Plan 004)`), not deleted: this node still
+# holds live membership authority until Plan 004's signed op-log replaces it,
+# so it is not yet a "blind peer" end to end (design docs/design/p2p-transport.md
+# §B.3, §F.6; plans/003-p1-node-demotion.md).
 #
 # Build context is the REPO ROOT (a pnpm workspace):
-#   docker build -f apps/relay/Dockerfile .
+#   docker build -f apps/node/Dockerfile .
 #
 # RUNTIME MODEL: the workspace packages export TypeScript SOURCE
 # (packages/*/package.json "exports" -> ./src/index.ts), and a `tsc` build
@@ -13,8 +19,8 @@
 # CLI runs. We still run the `tsc` build in-stage to type-check, but the
 # process is launched with tsx.
 #
-# ENTRYPOINT runs `prisma migrate deploy` (schema at apps/relay/prisma, URL
-# from DATABASE_URL via apps/relay/prisma.config.ts) BEFORE binding the port.
+# ENTRYPOINT runs `prisma migrate deploy` (schema at apps/node/prisma, URL
+# from DATABASE_URL via apps/node/prisma.config.ts) BEFORE binding the port.
 
 # ---------------------------------------------------------------------------
 # Stage 1: build — full workspace install, prisma generate, type-check build.
@@ -36,9 +42,9 @@ COPY . .
 # and the tsx dev runner).
 RUN pnpm install --frozen-lockfile
 
-# Generate the Prisma client (into node_modules) and type-check-build relay.
-RUN pnpm --filter @signalai/relay exec prisma generate
-RUN pnpm --filter @signalai/relay... run build
+# Generate the Prisma client (into node_modules) and type-check-build the node.
+RUN pnpm --filter @signalai/node exec prisma generate
+RUN pnpm --filter @signalai/node... run build
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime — slim image, no build toolchain. Runs from TS source.
@@ -53,10 +59,10 @@ WORKDIR /app
 # pnpm symlink farm.
 COPY --from=build /app /app
 
-# Relay binds 0.0.0.0:PORT (default 8080; Railway injects PORT). Health: /health.
+# Binds 0.0.0.0:PORT (default 8080; Railway injects PORT). Health: /health.
 EXPOSE 8080
 
-# Apply pending migrations, then launch the relay from source via tsx.
-# `pnpm --filter ... exec` runs in apps/relay, so prisma.config.ts and
+# Apply pending migrations, then launch the node from source via tsx.
+# `pnpm --filter ... exec` runs in apps/node, so prisma.config.ts and
 # src/index.ts resolve correctly.
-CMD ["sh", "-c", "pnpm --filter @signalai/relay exec prisma migrate deploy && exec pnpm --filter @signalai/relay exec tsx src/index.ts"]
+CMD ["sh", "-c", "pnpm --filter @signalai/node exec prisma migrate deploy && exec pnpm --filter @signalai/node exec tsx src/index.ts"]

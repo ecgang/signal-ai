@@ -15,11 +15,17 @@
       "@signalai/proto": [
         "./packages/proto/src/index.ts"
       ],
+      "@signalai/membership": [
+        "./packages/membership/src/index.ts"
+      ],
       "@signalai/client-sdk": [
         "./packages/client-sdk/src/index.ts"
       ],
-      "@signalai/relay": [
-        "./apps/relay/src/index.ts"
+      "@signalai/p2p": [
+        "./packages/p2p/src/index.ts"
+      ],
+      "@signalai/node": [
+        "./apps/node/src/index.ts"
       ]
     },
     "strict": true,

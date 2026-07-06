@@ -190,6 +190,10 @@ export async function listActiveDeviceIds(prisma: PrismaClient, userId: string):
 // Conversations + membership
 // ---------------------------------------------------------------------------
 
+// AUTHORITY — removed in P2 (Plan 004); do not extend. Membership mutation
+// authority moves to the client-side signed op-log fold (design §B.2); this
+// function is fenced, not deleted, so the current relay/node keeps working
+// until that op-log is authoritative.
 export async function createConversation(
   prisma: PrismaClient,
   params: { creatorUserId: string; memberUserIds: string[]; aiMode: boolean },
@@ -214,6 +218,11 @@ export async function createConversation(
   });
 }
 
+// AUTHORITY — removed in P2 (Plan 004); do not extend. `isActiveMember` is
+// the relay's authoritative membership read (design §B.2: `listMembers`
+// becomes a local fold over the signed op-log, not a server round-trip).
+// Fenced, not deleted — every WS/route gate below still calls this because
+// the op-log is not yet authoritative.
 export async function isActiveMember(
   prisma: PrismaClient,
   conversationId: string,
@@ -225,6 +234,7 @@ export async function isActiveMember(
   return membership !== null;
 }
 
+// AUTHORITY — removed in P2 (Plan 004); do not extend.
 /** True if `userId` is the conversation's creator or an active admin member. */
 export async function canManageMembership(
   prisma: PrismaClient,
@@ -250,6 +260,11 @@ export async function canManageMembership(
  * functions are called ONLY after route-level auth confirms the caller is
  * the conversation creator or an active admin member (canManageMembership).
  * A bug here is a membership-integrity bug for the whole conversation.
+ *
+ * AUTHORITY — removed in P2 (Plan 004); do not extend. Plan 004's signed,
+ * hash-chained op-log (design §B.2) replaces this whole boundary with a
+ * client-side deterministic fold; these functions are fenced, not deleted,
+ * until that op-log is authoritative.
  * ============================================================================
  */
 export async function inviteMember(
@@ -279,6 +294,8 @@ export async function removeMember(
   });
 }
 
+// AUTHORITY — removed in P2 (Plan 004); do not extend. `aiMode` toggling
+// moves to the founder-signed op-log (design §B.2); fenced, not deleted.
 export async function setAiMode(prisma: PrismaClient, conversationId: string, enabled: boolean): Promise<void> {
   await prisma.conversation.update({
     where: { id: conversationId },
@@ -286,6 +303,7 @@ export async function setAiMode(prisma: PrismaClient, conversationId: string, en
   });
 }
 
+// AUTHORITY — removed in P2 (Plan 004); do not extend.
 /** Current AI mode for a conversation. `true` when `aiMode === "active"`. */
 export async function getAiMode(prisma: PrismaClient, conversationId: string): Promise<boolean> {
   const conv = await prisma.conversation.findUnique({
@@ -300,6 +318,9 @@ export interface MemberListEntry {
   deviceIds: number[];
 }
 
+// AUTHORITY — removed in P2 (Plan 004); do not extend. `listMembers`
+// becomes a local fold over the signed op-log on the client (design §B.2,
+// §C) — no server round-trip. Fenced, not deleted.
 export async function listMembers(prisma: PrismaClient, conversationId: string): Promise<MemberListEntry[]> {
   const memberships = await prisma.membership.findMany({
     where: { conversationId, removedAt: null },
@@ -312,6 +333,11 @@ export async function listMembers(prisma: PrismaClient, conversationId: string):
   );
 }
 
+// AUTHORITY — removed in P2 (Plan 004); do not extend. Used only to scope
+// the mailbox drain to conversations the op-log currently says are active
+// for this user — the membership *decision*, not the mailbox operation
+// itself (see MailboxService.drain, which takes the resulting id list as a
+// plain parameter and does not compute it).
 /** All conversation ids `userId` is currently an active member of. */
 export async function listActiveConversationIds(prisma: PrismaClient, userId: string): Promise<string[]> {
   const memberships = await prisma.membership.findMany({

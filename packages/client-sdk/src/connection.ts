@@ -1,12 +1,15 @@
 import {
   WsDeliverFrameSchema,
   WsReadyFrameSchema,
+  WsOpDeliverFrameSchema,
   type Envelope,
   type WsSendFrame,
   type WsAckFrame,
   type WsSubscribeFrame,
+  type WsOpSendFrame,
+  type WsOpDeliverFrame,
 } from "@signalai/proto";
-import type { ClientSocket, Transport } from "./transport.js";
+import type { ClientSocket, MessageTransport } from "./transport.js";
 import type { ConnectionState } from "./types.js";
 
 /** The relay's own connection handshake frame (see apps/relay/src/index.ts) — not part of @signalai/proto's wire union because it's a pure transport concern the relay never forwards. */
@@ -16,30 +19,63 @@ interface WsAuthFrame {
   deviceId: number;
 }
 
-type OutgoingFrame = WsAuthFrame | WsSendFrame | WsAckFrame | WsSubscribeFrame;
+type OutgoingFrame = WsAuthFrame | WsSendFrame | WsAckFrame | WsSubscribeFrame | WsOpSendFrame;
 
-export interface WsLinkHandlers {
+export interface DuplexLinkHandlers {
   onReady: () => void;
   onDeliver: (envelope: Envelope) => void;
   onStateChange: (state: ConnectionState) => void;
+  /**
+   * Fires on an incoming `op-deliver` frame (Phase A.2) — one membership
+   * op propagated by the relay for `conversationId` at chain position `seq`,
+   * opaque base64 in `op` (see `WsOpDeliverFrameSchema`). Optional: only
+   * `SignalAiClient` wires it (to accumulate + persist the receiver chain);
+   * a bare `DuplexLink` consumer that doesn't care about membership ops can
+   * omit it.
+   */
+  onOp?: (frame: WsOpDeliverFrame) => void;
 }
+
+/**
+ * The mailbox-drain seam, negotiated per link rather than assumed by every
+ * link (docs/design/p2p-transport.md §C, Neo lock #3). `onReady` fires once
+ * per successful handshake, right after the transport-level `ready` state is
+ * reached. The relay path passes {@link NO_OP_DRAIN}: the relay already
+ * drains this device's offline mailbox server-side before/at `ready`, so
+ * there is nothing for the client to do. A future node/mailbox-backed P2P
+ * link (no server-side queue) implements this via a client-side replay
+ * buffer request; a direct (mailbox-less) peer connection genuinely has none
+ * and also uses {@link NO_OP_DRAIN} — modeled as an explicit no-op, not a
+ * faked empty mailbox.
+ */
+export interface DrainCapability {
+  onReady(): void;
+}
+
+/** The default drain capability: the relay auto-drains server-side, so there is nothing for the client to trigger. */
+export const NO_OP_DRAIN: DrainCapability = {
+  onReady: () => {},
+};
 
 const INITIAL_BACKOFF_MS = 300;
 const MAX_BACKOFF_MS = 10_000;
 const KEEPALIVE_MS = 20_000;
 
 /**
- * Maintains one authenticated WS connection to the relay: opens the socket,
- * authenticates via the first-frame path (`{type:"auth", token, deviceId}`),
- * waits for `ready`, and auto-reconnects with exponential backoff on any
- * unexpected close. No client-driven polling is needed for delivery: the
- * relay live-pushes to any open, authenticated recipient socket on `send`
- * (see `apps/relay/src/index.ts`'s `liveSockets` registry) and automatically
- * drains this device's offline mailbox once, right after every `ready`.
- * `subscribe()` (below) is exposed as a manual resync primitive but is not
- * required for normal delivery.
+ * Maintains one authenticated duplex connection (relay WS today; a P2P
+ * duplex stream in a future transport) via {@link MessageTransport.openSocket}:
+ * opens the socket, authenticates via the first-frame path
+ * (`{type:"auth", token, deviceId}`), waits for `ready`, and auto-reconnects
+ * with exponential backoff on any unexpected close. No client-driven polling
+ * is needed for delivery on the relay: the relay live-pushes to any open,
+ * authenticated recipient socket on `send` (see `apps/relay/src/index.ts`'s
+ * `liveSockets` registry) and automatically drains this device's offline
+ * mailbox once, right after every `ready` — see {@link DrainCapability} for
+ * how that assumption is now an explicit, negotiated seam rather than baked
+ * into every link. `subscribe()` (below) is exposed as a manual resync
+ * primitive but is not required for normal delivery.
  */
-export class WsLink {
+export class DuplexLink {
   private socket: ClientSocket | undefined;
   private closedByUser = false;
   private backoffMs = INITIAL_BACKOFF_MS;
@@ -48,10 +84,11 @@ export class WsLink {
   private ready = false;
 
   constructor(
-    private readonly transport: Transport,
+    private readonly transport: MessageTransport,
     private readonly token: string,
     private readonly deviceId: number,
-    private readonly handlers: WsLinkHandlers,
+    private readonly handlers: DuplexLinkHandlers,
+    private readonly drain: DrainCapability = NO_OP_DRAIN,
   ) {}
 
   /** Opens the socket and resolves once the relay's `ready` frame arrives (rejects if the socket errors/closes first). */
@@ -86,6 +123,7 @@ export class WsLink {
         this.backoffMs = INITIAL_BACKOFF_MS;
         this.startKeepalive();
         this.handlers.onStateChange("connected");
+        this.drain.onReady();
         this.handlers.onReady();
         if (!settled) {
           settled = true;
@@ -97,6 +135,12 @@ export class WsLink {
       const deliverFrame = WsDeliverFrameSchema.safeParse(parsed);
       if (deliverFrame.success) {
         this.handlers.onDeliver(deliverFrame.data.envelope);
+        return;
+      }
+
+      const opDeliverFrame = WsOpDeliverFrameSchema.safeParse(parsed);
+      if (opDeliverFrame.success) {
+        this.handlers.onOp?.(opDeliverFrame.data);
       }
     });
 
@@ -144,8 +188,8 @@ export class WsLink {
     socket.send(JSON.stringify(frame));
   }
 
-  send(frame: WsSendFrame | WsAckFrame): void {
-    if (!this.socket || !this.ready) throw new Error("WsLink.send: socket is not connected/ready");
+  send(frame: WsSendFrame | WsAckFrame | WsOpSendFrame): void {
+    if (!this.socket || !this.ready) throw new Error("DuplexLink.send: socket is not connected/ready");
     this.rawSend(this.socket, frame);
   }
 

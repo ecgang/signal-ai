@@ -57,12 +57,34 @@ export function parseEnvelope(data: unknown): Envelope {
 // ciphertext, and decrypts back out of one.
 // ---------------------------------------------------------------------------
 
+/**
+ * An authenticated reference to a membership op-log position (Plan 004,
+ * PREREQ-1). `seq` is the log position and `headHash` is the lowercase-hex
+ * SHA-256 of the canonical encoding of the op at that position.
+ *
+ * This rides INSIDE {@link PlaintextMessageSchema} — the ratchet-encrypted,
+ * end-to-end authenticated payload — so it inherits libsignal's sender
+ * authentication for free. It is NEVER added to the cleartext
+ * {@link EnvelopeSchema} envelope, which a node/relay can read and forge.
+ */
+export const MembershipHeadSchema = z.object({
+  seq: z.number().int().nonnegative(),
+  headHash: z.string().min(1),
+});
+export type MembershipHead = z.infer<typeof MembershipHeadSchema>;
+
 /** The plaintext content carried inside a decrypted Envelope. */
 export const PlaintextMessageSchema = z.object({
   msgId: z.string().min(1),
   text: z.string(),
   mentions: z.array(z.string()),
   sentAt: z.number().int().nonnegative(),
+  /**
+   * OPTIONAL on the wire so old ciphertext still parses — but the membership
+   * receiver gate treats an ABSENT head as fail-closed REJECT (Plan 004 §6).
+   * Optional-parse is not default-accept.
+   */
+  membershipHead: MembershipHeadSchema.optional(),
 });
 export type PlaintextMessage = z.infer<typeof PlaintextMessageSchema>;
 
@@ -125,6 +147,30 @@ export const WsSendFrameSchema = z.object({
 });
 export type WsSendFrame = z.infer<typeof WsSendFrameSchema>;
 
+/**
+ * Client -> relay: submit one signed membership op for propagation. `op` is the
+ * base64 canonical encoding of a signed MembershipOp (opaque to the relay — it
+ * NEVER decodes it). `seq` is the op's own chain position, carried in cleartext
+ * (like Envelope.seq) purely so the relay can order/dedupe/route without reading
+ * the op body. Membership authority lives in the signed chain, not the relay.
+ */
+export const WsOpSendFrameSchema = z.object({
+  type: z.literal("op-send"),
+  conversationId: z.string().min(1),
+  seq: z.number().int().nonnegative(),
+  op: z.string().min(1),
+});
+export type WsOpSendFrame = z.infer<typeof WsOpSendFrameSchema>;
+
+/** Relay -> client: deliver one stored membership op (opaque base64, see WsOpSendFrame). */
+export const WsOpDeliverFrameSchema = z.object({
+  type: z.literal("op-deliver"),
+  conversationId: z.string().min(1),
+  seq: z.number().int().nonnegative(),
+  op: z.string().min(1),
+});
+export type WsOpDeliverFrame = z.infer<typeof WsOpDeliverFrameSchema>;
+
 /** The discriminated union of every WS frame kind, keyed on `type`. */
 export const WsFrameSchema = z.discriminatedUnion("type", [
   WsDeliverFrameSchema,
@@ -132,6 +178,8 @@ export const WsFrameSchema = z.discriminatedUnion("type", [
   WsAckFrameSchema,
   WsSubscribeFrameSchema,
   WsSendFrameSchema,
+  WsOpSendFrameSchema,
+  WsOpDeliverFrameSchema,
 ]);
 export type WsFrame = z.infer<typeof WsFrameSchema>;
 

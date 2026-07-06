@@ -58,7 +58,7 @@ A pnpm + TypeScript monorepo:
 | `packages/core` | libsignal wrapper: identities, prekeys, sessions, pairwise group fan-out |
 | `packages/proto` | zod-validated wire + API contract (envelopes, REST, WS frames) |
 | `packages/client-sdk` | headless client used by the CLI, the AI agent, and tests |
-| `apps/relay` | Fastify + Postgres relay: ciphertext store-and-forward, key directory |
+| `apps/node` (demoted from `apps/relay`) | Fastify + Postgres: ciphertext-only `MailboxService` store-and-forward, key directory, plus membership routes fenced for removal once `packages/membership`'s signed op-log lands (Plan 004) |
 | `apps/agent` | the AI member — a headless client with its own keys + a pluggable LLM (provider-agnostic OpenAI-compatible client; default Nemotron, Anthropic also supported) |
 | `apps/cli` | the terminal client (the product surface) |
 

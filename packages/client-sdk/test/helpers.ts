@@ -1,7 +1,7 @@
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { PrismaClient } from "@prisma/client";
-import { buildApp, createPrismaClient } from "@signalai/relay";
+import { buildApp, createPrismaClient } from "@signalai/node";
 import { SignalAiClient, type IncomingMessage, type SystemEvent } from "../src/index.js";
 
 /**

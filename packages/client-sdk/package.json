@@ -13,12 +13,15 @@
   },
   "dependencies": {
     "@signalai/core": "workspace:*",
+    "@signalai/membership": "workspace:*",
+    "@signalai/p2p": "workspace:*",
     "@signalai/proto": "workspace:*",
     "better-sqlite3": "^12.11.1",
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@signalai/relay": "workspace:*",
+    "@hyperswarm/testnet": "^3.1.4",
+    "@signalai/node": "workspace:*",
     "@types/better-sqlite3": "^7.6.13",
     "@types/ws": "^8.18.1"
   },
