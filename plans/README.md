@@ -41,6 +41,7 @@ nonsensical membership methods → big-bang cutover. 001 is what makes this incr
 | 002 | `packages/p2p` hyperswarm wrapper + `transport-p2p.ts` (2nd `MessageTransport`) + acceptance check: implements message plane WITHOUT stubbing account/directory/membership | P0 | 001 | — | TODO |
 | 003 | `apps/relay`→`apps/node` demotion: ciphertext `MailboxService` only, **extract + FENCE authority code (do NOT delete)** | P1 | 001 | F.6 | TODO |
 | 004 | `packages/membership` signed op-log: receiver-side enforcement + genesis re-send **+ authenticated log-head metadata (proto) + latestness/head mechanism**; deletion of relay authority is a 004 postcondition | P2 | 001, 002 | F.2, F.3, F.4 | TODO |
+| 005 | Follow-up (hardening): make `listMembers` fail-closed when the membership fold is `undefined` instead of falling back to the raw relay roster (surfaced by the InvitePin-TOFU Verifier pass) | P2-followup | 004 | F.3 | OPEN |
 
 > **Authority-deletion ordering (do not violate — Codex critical #4):** Plan 003 **only
 > extracts and fences** the relay's membership/authority handlers (marks them
